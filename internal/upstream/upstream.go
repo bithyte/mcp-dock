@@ -9,14 +9,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"slices"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -64,6 +67,7 @@ type Upstream struct {
 
 	mu      sync.RWMutex
 	session *mcp.ClientSession // nil while down
+	dead    chan struct{}      // closed when session's connection ends
 	tools   []*mcp.Tool        // nil while down
 
 	progress sync.Map // progress token (string) -> func(*mcp.ProgressNotificationParams)
@@ -105,7 +109,7 @@ func (u *Upstream) Tools() []*mcp.Tool {
 func (u *Upstream) Call(ctx context.Context, tool string, args json.RawMessage,
 	onProgress func(*mcp.ProgressNotificationParams)) (*mcp.CallToolResult, error) {
 	u.mu.RLock()
-	s := u.session
+	s, dead := u.session, u.dead
 	u.mu.RUnlock()
 	if s == nil {
 		return nil, ErrUnavailable
@@ -125,12 +129,36 @@ func (u *Upstream) Call(ctx context.Context, tool string, args json.RawMessage,
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
-		if errors.Is(err, mcp.ErrConnectionClosed) {
+		if sessionLost(err, dead) {
 			return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 		}
 		return nil, err
 	}
 	return res, nil
+}
+
+// sessionLost reports whether a failed call failed because the connection to
+// the upstream went away (process died, pipe broke, session closed), as
+// opposed to the upstream answering with an error. When the process dies
+// mid-call the SDK retires the call with the read error (io.EOF), not
+// mcp.ErrConnectionClosed, so check transport errors and the session's
+// liveness too.
+func sessionLost(err error, dead <-chan struct{}) bool {
+	var wire *jsonrpc.Error
+	if errors.As(err, &wire) {
+		return false // a real response from the upstream
+	}
+	if errors.Is(err, mcp.ErrConnectionClosed) || errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	select {
+	case <-dead:
+		return true
+	default:
+		return false
+	}
 }
 
 // Run supervises the upstream until ctx is done. It never returns early:
@@ -222,14 +250,19 @@ func (u *Upstream) runOnce(ctx context.Context) (time.Duration, error) {
 		_ = session.Close()
 		return time.Since(started), fmt.Errorf("list tools: %w", err)
 	}
+	dead := make(chan struct{})
+	exited := make(chan error, 1)
+	go func() {
+		err := session.Wait()
+		close(dead)
+		exited <- err
+	}()
 	u.mu.Lock()
-	u.session, u.tools = session, tools
+	u.session, u.tools, u.dead = session, tools, dead
 	u.mu.Unlock()
 	u.log.Info("upstream started", "tools", len(tools))
 	u.notify()
 
-	exited := make(chan error, 1)
-	go func() { exited <- session.Wait() }()
 	rctx, rcancel := context.WithCancel(ctx)
 	refreshDone := make(chan struct{})
 	go func() {
@@ -247,7 +280,7 @@ func (u *Upstream) runOnce(ctx context.Context) (time.Duration, error) {
 
 	// Mark down before closing so new calls fail fast with ErrUnavailable.
 	u.mu.Lock()
-	u.session, u.tools = nil, nil
+	u.session, u.tools, u.dead = nil, nil, nil
 	u.mu.Unlock()
 	u.notify()
 

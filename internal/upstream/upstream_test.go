@@ -248,6 +248,9 @@ func TestCancelPropagates(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
+	if errors.Is(err, ErrUnavailable) {
+		t.Fatalf("cancelled call err = %v, must not be ErrUnavailable", err)
+	}
 	if d := time.Since(begin); d > 2*time.Second {
 		t.Fatalf("Call took %v after cancel", d)
 	}
@@ -255,6 +258,24 @@ func TestCancelPropagates(t *testing.T) {
 		b, err := os.ReadFile(cancelFile)
 		return err == nil && strings.TrimSpace(string(b)) == "cancelled"
 	})
+}
+
+func TestRPCErrorNotUnavailable(t *testing.T) {
+	h := start(t, nil)
+	h.waitUp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// Unknown tool: the upstream answers with a JSON-RPC error and stays up.
+	_, err := h.u.Call(ctx, "no_such_tool", json.RawMessage(`{}`), nil)
+	if err == nil {
+		t.Fatal("unknown tool returned no error")
+	}
+	if errors.Is(err, ErrUnavailable) {
+		t.Fatalf("JSON-RPC error mapped to ErrUnavailable: %v", err)
+	}
+	if got := call(t, h.u, "echo", `{"text":"still up"}`); got != "still up" {
+		t.Fatalf("echo = %q", got)
+	}
 }
 
 func TestCallsNotSerialized(t *testing.T) {
@@ -329,8 +350,8 @@ func TestCrashRestarts(t *testing.T) {
 	before := h.changeCount()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := h.u.Call(ctx, "crash", json.RawMessage(`{}`), nil); err == nil {
-		t.Fatal("crash call returned no error")
+	if _, err := h.u.Call(ctx, "crash", json.RawMessage(`{}`), nil); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("crash call err = %v, want ErrUnavailable", err)
 	}
 	eventually(t, 10*time.Second, "tools nil after crash", func() bool { return h.sawDownAfter(before) })
 	h.waitUp(t)
