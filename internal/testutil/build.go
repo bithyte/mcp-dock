@@ -40,3 +40,11 @@ func BuildFakeUpstream(t testing.TB) string {
 	}
 	return buildPath
 }
+
+// Cleanup removes the directory BuildFakeUpstream built into. Call it from
+// TestMain after m.Run in every package that uses BuildFakeUpstream.
+func Cleanup() {
+	if buildPath != "" {
+		os.RemoveAll(filepath.Dir(buildPath))
+	}
+}

@@ -20,6 +20,12 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+func TestMain(m *testing.M) {
+	code := m.Run()
+	testutil.Cleanup()
+	os.Exit(code)
+}
+
 // syncBuffer is a goroutine-safe log sink.
 type syncBuffer struct {
 	mu  sync.Mutex
