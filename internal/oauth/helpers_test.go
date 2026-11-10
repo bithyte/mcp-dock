@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/bithyte/mcp-dock/internal/config"
@@ -22,8 +23,40 @@ const (
 )
 
 // newTestServer starts an httptest server serving the oauth routes, with
-// public_url set to its own URL and allowlist ["cozmin"].
+// public_url set to its own URL and allowlist ["cozmin"]. Logs are discarded.
 func newTestServer(t *testing.T) (*Server, *httptest.Server, *testutil.FakeGitHub) {
+	t.Helper()
+	return newTestServerLog(t, io.Discard)
+}
+
+// logBuffer is a goroutine-safe log sink; handlers write from server
+// goroutines while the test reads.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// newTestServerLogs is newTestServer with JSON logs captured.
+func newTestServerLogs(t *testing.T) (*Server, *httptest.Server, *testutil.FakeGitHub, *logBuffer) {
+	t.Helper()
+	logs := &logBuffer{}
+	srv, ts, fake := newTestServerLog(t, logs)
+	return srv, ts, fake, logs
+}
+
+func newTestServerLog(t *testing.T, logOut io.Writer) (*Server, *httptest.Server, *testutil.FakeGitHub) {
 	t.Helper()
 	fake := testutil.NewFakeGitHub(t, testGitHubClientID, testGitHubClientSecret)
 	mux := http.NewServeMux()
@@ -51,7 +84,7 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server, *testutil.FakeGitHu
 			WebBaseURL:   fake.URL,
 			APIBaseURL:   fake.URL,
 		},
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger: slog.New(slog.NewJSONHandler(logOut, nil)),
 	})
 	srv.Routes(mux)
 	return srv, ts, fake

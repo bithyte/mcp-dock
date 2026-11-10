@@ -49,8 +49,9 @@ func New(opts Options) *Server {
 }
 
 // Routes registers every oauth path on mux. Every POST goes through
-// limitBody. Handlers for /authorize, /oauth/github/callback, /consent and
-// /token are 501 stubs until their tasks land.
+// limitBody. The consent POST is /oauth/consent (not /consent) so the
+// mcpdock_auth cookie, scoped to /oauth/, is sent with it. /token is a 501
+// stub until its task lands.
 func (s *Server) Routes(mux *http.ServeMux) {
 	prm := cors(http.HandlerFunc(s.handleProtectedResource))
 	mux.Handle("GET /.well-known/oauth-protected-resource", prm)
@@ -65,9 +66,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /register", reg)
 	mux.Handle("OPTIONS /register", reg)
 
-	mux.Handle("GET /authorize", http.HandlerFunc(notImplemented))
-	mux.Handle("GET /oauth/github/callback", http.HandlerFunc(notImplemented))
-	mux.Handle("POST /consent", limitBody(http.HandlerFunc(notImplemented)))
+	mux.Handle("GET /authorize", http.HandlerFunc(s.handleAuthorize))
+	mux.Handle("GET "+callbackPath, http.HandlerFunc(s.handleGitHubCallback))
+	mux.Handle("POST "+consentPath, limitBody(http.HandlerFunc(s.handleConsent)))
 	mux.Handle("POST /token", limitBody(http.HandlerFunc(notImplemented)))
 }
 

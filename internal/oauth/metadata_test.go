@@ -100,7 +100,7 @@ func TestLaterTaskRoutesRegistered(t *testing.T) {
 	for _, c := range []struct{ method, path string }{
 		{"GET", "/authorize"},
 		{"GET", "/oauth/github/callback"},
-		{"POST", "/consent"},
+		{"POST", "/oauth/consent"},
 		{"POST", "/token"},
 	} {
 		req, _ := http.NewRequest(c.method, ts.URL+c.path, nil)
