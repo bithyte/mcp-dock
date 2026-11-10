@@ -28,10 +28,6 @@ var (
 	authMethods = []string{"none", "client_secret_post", "client_secret_basic"}
 	grantTypes  = []string{"authorization_code", "refresh_token"}
 
-	// httpsRedirects are the only https redirect URIs accepted, compared as
-	// exact strings. Arbitrary web redirects are refused.
-	httpsRedirects = []string{"https://claude.ai/api/mcp/auth_callback"}
-
 	// loopbackHost matches the parsed URL.Host of an http loopback redirect:
 	// localhost, 127.0.0.1 or [::1], with an optional port.
 	loopbackHost = regexp.MustCompile(`^(localhost|127\.0\.0\.1|\[::1\])(:[0-9]{1,5})?$`)
@@ -53,7 +49,10 @@ var errBadRedirect = errors.New("invalid redirect_uri")
 //   - Only printable ASCII, no backslash, no fragment ('#' anywhere),
 //     at most maxRedirectURILen bytes, absolute (non-empty scheme), no
 //     userinfo. Checks run on url.Parse fields, not string prefixes.
-//   - https: only the exact strings in httpsRedirects (Claude's callback).
+//   - https: any URI with a host (non-empty Hostname, not opaque), so
+//     Claude's https://claude.ai/api/mcp/auth_callback and other web clients
+//     work. Redirects aren't otherwise restricted; the consent page (client
+//     name and redirect host) is the mitigation.
 //   - http: loopback only. URL.Host must be exactly localhost, 127.0.0.1 or
 //     [::1], any port 1-65535 or none; any path and query. So
 //     localhost.evil.com, 127.0.0.1.evil.com and localhost@evil.com fail.
@@ -61,7 +60,7 @@ var errBadRedirect = errors.New("invalid redirect_uri")
 //     com.example.app:/cb). It's accepted unless it's in deniedSchemes, and
 //     it needs a non-empty scheme-specific part (opaque data, a host, or a
 //     path other than "/"). The consent page is what protects users from a
-//     malicious app claiming a scheme.
+//     malicious app claiming a scheme, as it does for https redirects.
 func validateRedirectURI(raw string) error {
 	if raw == "" || len(raw) > maxRedirectURILen {
 		return errBadRedirect
@@ -77,7 +76,7 @@ func validateRedirectURI(raw string) error {
 	}
 	switch u.Scheme {
 	case "https":
-		if !slices.Contains(httpsRedirects, raw) {
+		if u.Opaque != "" || u.Hostname() == "" {
 			return errBadRedirect
 		}
 		return nil
@@ -162,7 +161,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	for _, u := range meta.RedirectURIs {
 		if err := validateRedirectURI(u); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_redirect_uri",
-				"redirect_uris must be https://claude.ai/api/mcp/auth_callback, an http loopback URL, or a native app scheme, without a fragment")
+				"redirect_uris must be https URLs, http loopback URLs, or native app schemes, without a fragment or userinfo")
 			return
 		}
 	}
