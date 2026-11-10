@@ -3,7 +3,7 @@ listen: ":8080"
 data_dir: /var/lib/mcp-dock
 
 github:
-  client_id: Iv1.xxxxx
+  client_id: Ov23liXXXXXXXXXXXXXX
   client_secret_env: GITHUB_CLIENT_SECRET
 
 allowed_users:

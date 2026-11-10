@@ -11,7 +11,7 @@ const validYAML = `
 public_url: https://mcp.cozminu.com/
 data_dir: /var/lib/mcp-dock
 github:
-  client_id: Iv1.xxxxx
+  client_id: Ov23liXXXXXXXXXXXXXX
   client_secret_env: GITHUB_CLIENT_SECRET
 allowed_users: [Cozmin]
 upstreams:
@@ -77,7 +77,7 @@ func TestLoadRejects(t *testing.T) {
 		{"public_url fragment", r("https://mcp.cozminu.com/", "\"https://mcp.cozminu.com#x\"").Replace(validYAML), "public_url", goodEnv},
 		{"public_url empty fragment", r("https://mcp.cozminu.com/", "\"https://mcp.cozminu.com/#\"").Replace(validYAML), "public_url", goodEnv},
 		{"missing data_dir", r("data_dir: /var/lib/mcp-dock\n", "").Replace(validYAML), "data_dir", goodEnv},
-		{"missing client_id", r("client_id: Iv1.xxxxx", "client_id: \"\"").Replace(validYAML), "client_id", goodEnv},
+		{"missing client_id", r("client_id: Ov23liXXXXXXXXXXXXXX", "client_id: \"\"").Replace(validYAML), "client_id", goodEnv},
 		{"secret env empty", validYAML, "client_secret_env", map[string]string{"JAYPOST_TOKEN": "t"}},
 		{"name uppercase", r("name: jaypost", "name: Jay").Replace(validYAML), "name", goodEnv},
 		{"name double underscore", r("name: jaypost", "name: jay__post").Replace(validYAML), "name", goodEnv},
