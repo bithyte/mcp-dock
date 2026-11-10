@@ -273,7 +273,7 @@ func TestRegisterClientNameCapped(t *testing.T) {
 func TestRegisterClientNameStripsControls(t *testing.T) {
 	srv, ts, _ := newTestServer(t)
 	_, m := postJSON(t, ts.URL+"/register", map[string]any{
-		"client_name":   "  Good‮evil\x00\n App  ",
+		"client_name":   "  Good\u202eevil\x00\n App  ",
 		"redirect_uris": []string{claudeRedirect},
 	})
 	c, err := srv.store.GetClient(context.Background(), m["client_id"].(string))

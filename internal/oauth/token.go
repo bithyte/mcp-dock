@@ -59,9 +59,13 @@ type tokenResponse struct {
 }
 
 // handleToken is the RFC 6749 token endpoint for the authorization_code
-// (PKCE S256 required) and refresh_token grants. Codes and refresh tokens
-// are consumed atomically before any further check, so a failed attempt
-// burns them.
+// (PKCE S256 required) and refresh_token grants. The form, client
+// authentication, the presence of redirect_uri, the code_verifier syntax and
+// the resource parameter are checked first; a request failing those leaves
+// the code or refresh token untouched. Then the code or refresh token is
+// consumed atomically, and the remaining checks (client, redirect_uri and
+// PKCE match, stored resource, allowlist, refresh scope) run on the consumed
+// value, so a failed attempt past that point burns it.
 func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	form, terr := parseTokenForm(r)
 	if terr != nil {
