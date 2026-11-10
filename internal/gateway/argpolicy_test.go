@@ -107,6 +107,15 @@ func TestCheck(t *testing.T) {
 		{`42`, "", false},
 		{`{"path":"x"}`, "", false},
 		{`{bad json`, "", true},
+		{`{"a":1} x`, "", true},
+		{`{"Attachment":{"Path":"/etc/passwd"}}`, "attachment.path", false},
+		{`{"ATTACHMENT":{"text":"x","PATH":null}}`, "attachment.path", false},
+		{`{"attachment":{"path":"x"},"attachment":{"text":"y"}}`, "attachment.path", false},
+		{`{"attachment":{"text":"y"},"attachment":{"path":"x"}}`, "attachment.path", false},
+		{`{"attachment":"s","Attachment":{"path":1}}`, "attachment.path", false},
+		{`{"attachment":{"text":"y","path":"a","PATH":"b"}}`, "attachment.path", false},
+		{`{"x":[{"attachment":{"path":"z"}}],"attachment":{"text":"y"}}`, "", false},
+		{`{"attachment":{"text":"y"},"attachment":null}`, "", false},
 	}
 	for _, c := range cases {
 		d, err := p.Check(json.RawMessage(c.in))

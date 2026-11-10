@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 )
 
@@ -86,35 +87,78 @@ func stripNode(node any, segs []string) {
 }
 
 // Check returns the first denied path present in args, or "" if allowed.
-// A key counts as present even when its value is null. Non-object values
-// along a path are not denied. err is returned only for invalid JSON.
+// A key counts as present even when its value is null. Keys match
+// case-insensitively and every occurrence of a duplicate key is inspected,
+// because upstream parsers may differ on case and on first/last-wins.
+// Non-object values along a path are not denied. err is returned only for
+// invalid JSON.
 func (p ArgPolicy) Check(args json.RawMessage) (denied string, err error) {
 	if len(bytes.TrimSpace(args)) == 0 {
 		return "", nil
 	}
-	var v any
-	if err := json.Unmarshal(args, &v); err != nil {
-		return "", err
+	if !json.Valid(args) {
+		return "", errors.New("invalid JSON arguments")
 	}
 	for _, segs := range p.paths {
-		cur := v
-		found := true
-		for _, seg := range segs {
-			m, ok := cur.(map[string]any)
-			if !ok {
-				found = false
-				break
-			}
-			next, has := m[seg]
-			if !has {
-				found = false
-				break
-			}
-			cur = next
+		dec := json.NewDecoder(bytes.NewReader(args))
+		found, err := walk(dec, segs)
+		if err != nil {
+			return "", err
 		}
 		if found {
 			return strings.Join(segs, "."), nil
 		}
 	}
 	return "", nil
+}
+
+// walk consumes exactly one JSON value from dec and reports whether the
+// remaining path segs resolves to a present key anywhere inside it.
+// With empty segs it just consumes the value.
+func walk(dec *json.Decoder, segs []string) (bool, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return false, err
+	}
+	d, ok := tok.(json.Delim)
+	if !ok {
+		return false, nil
+	}
+	found := false
+	switch d {
+	case '{':
+		for dec.More() {
+			kt, err := dec.Token()
+			if err != nil {
+				return false, err
+			}
+			key, _ := kt.(string)
+			if len(segs) > 0 && strings.EqualFold(key, segs[0]) {
+				if len(segs) == 1 {
+					found = true
+					if _, err := walk(dec, nil); err != nil {
+						return false, err
+					}
+				} else {
+					f, err := walk(dec, segs[1:])
+					if err != nil {
+						return false, err
+					}
+					found = found || f
+				}
+			} else if _, err := walk(dec, nil); err != nil {
+				return false, err
+			}
+		}
+	case '[':
+		for dec.More() {
+			if _, err := walk(dec, nil); err != nil {
+				return false, err
+			}
+		}
+	}
+	if _, err := dec.Token(); err != nil { // closing delimiter
+		return false, err
+	}
+	return found, nil
 }
