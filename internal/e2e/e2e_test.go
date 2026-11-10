@@ -569,3 +569,52 @@ func TestEndToEndLateUpstream(t *testing.T) {
 		t.Fatal("no tools/list_changed after the late upstream came up")
 	}
 }
+
+// An MCP session is bound to the user who opened it: another user's token
+// with that session's ID is refused by the SDK.
+func TestEndToEndSessionBoundToUser(t *testing.T) {
+	e := newEnv(t)
+	cozminToken := e.login(t, "cozmin", 1)
+	cozmin := e.connect(t, cozminToken, nil)
+	waitTools(t, cozmin, "fake__echo")
+	sid := cozmin.ID()
+	if sid == "" {
+		t.Fatal("no session ID")
+	}
+	friendToken := e.login(t, "friend", 2)
+
+	post := func(token, body string) (*http.Response, string) {
+		req, _ := http.NewRequest(http.MethodPost, e.cfg.ResourceURL(), strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("Mcp-Protocol-Version", "2025-06-18")
+		req.Header.Set("Mcp-Session-Id", sid)
+		req.Header.Set("Authorization", "Bearer "+token)
+		return reader{t}.read(http.DefaultClient.Do(req))
+	}
+	list := `{"jsonrpc":"2.0","id":99,"method":"tools/list","params":{}}`
+	echo := `{"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"fake__echo","arguments":{"text":"hijack"}}}`
+	// Control: the same raw request with the owner's token is accepted, so
+	// the 403 below is about the user, not the request shape.
+	resp, rb := post(cozminToken, list)
+	expect(t, "cozmin using own session", resp, rb, http.StatusOK)
+	if !strings.Contains(rb, "fake__echo") {
+		t.Fatalf("control tools/list: %s", rb)
+	}
+	for _, body := range []string{list, echo} {
+		resp, rb := post(friendToken, body)
+		expect(t, "friend using cozmin's session", resp, rb, http.StatusForbidden)
+		if strings.Contains(rb, "fake__echo") || strings.Contains(rb, "hijack") {
+			t.Fatalf("response leaks session data: %s", rb)
+		}
+	}
+	for _, r := range e.logs.records("tool call") {
+		if r["user"] == "friend" {
+			t.Fatalf("friend's call reached the gateway: %v", r)
+		}
+	}
+	// The owner's session still works.
+	if res := call(t, cozmin, "fake__echo", map[string]any{"text": "still mine"}); resultText(res) != "still mine" {
+		t.Fatalf("echo %q", resultText(res))
+	}
+}
