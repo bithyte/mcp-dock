@@ -84,6 +84,23 @@ func (s *Store) SetAuthRequestUser(ctx context.Context, id, login string, github
 	return nil
 }
 
+// ConsumeAuthRequest atomically deletes and returns an unexpired auth
+// request. Only one caller can win; the rest get ErrNotFound.
+func (s *Store) ConsumeAuthRequest(ctx context.Context, id string, now time.Time) (*AuthRequest, error) {
+	var r AuthRequest
+	var exp int64
+	err := s.db.QueryRowContext(ctx,
+		`DELETE FROM auth_requests WHERE id=? AND expires_at>?
+		 RETURNING id, client_id, redirect_uri, client_state, code_challenge, resource, scope, login, github_id, expires_at`,
+		id, ts(now)).
+		Scan(&r.ID, &r.ClientID, &r.RedirectURI, &r.ClientState, &r.CodeChallenge, &r.Resource, &r.Scope, &r.Login, &r.GitHubID, &exp)
+	if err != nil {
+		return nil, notFound(err)
+	}
+	r.ExpiresAt = fromTS(exp)
+	return &r, nil
+}
+
 func (s *Store) DeleteAuthRequest(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM auth_requests WHERE id=?`, id)
 	return err

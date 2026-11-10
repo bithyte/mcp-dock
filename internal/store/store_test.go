@@ -68,6 +68,39 @@ func TestAuthRequestFlow(t *testing.T) {
 	}
 }
 
+func TestConsumeAuthRequestOnce(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	now := time.Now()
+	r := AuthRequest{ID: "a1", ClientID: "c", RedirectURI: "r", ClientState: "st", CodeChallenge: "ch",
+		Resource: "res", Scope: "sc", ExpiresAt: now.Add(time.Minute)}
+	if err := s.SaveAuthRequest(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAuthRequestUser(ctx, "a1", "Cozmin", 7); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ConsumeAuthRequest(ctx, "a1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "a1" || got.ClientID != "c" || got.RedirectURI != "r" || got.ClientState != "st" ||
+		got.CodeChallenge != "ch" || got.Resource != "res" || got.Scope != "sc" ||
+		got.Login != "cozmin" || got.GitHubID != 7 {
+		t.Fatalf("consumed %+v", got)
+	}
+	if _, err := s.ConsumeAuthRequest(ctx, "a1", now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second consume: %v, want ErrNotFound", err)
+	}
+	if _, err := s.ConsumeAuthRequest(ctx, "missing", now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing: %v, want ErrNotFound", err)
+	}
+	s.SaveAuthRequest(ctx, AuthRequest{ID: "a2", ExpiresAt: now.Add(-time.Minute)})
+	if _, err := s.ConsumeAuthRequest(ctx, "a2", now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired: %v, want ErrNotFound", err)
+	}
+}
+
 func TestCodeSingleUse(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()

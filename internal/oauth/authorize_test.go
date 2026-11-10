@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bithyte/mcp-dock/internal/store"
@@ -539,6 +540,69 @@ func TestConsentApproveIssuesCode(t *testing.T) {
 	setJarCookie(t, c, ts, reqID)
 	resp, _ = postForm(t, c, ts.URL+"/oauth/consent", url.Values{"request": {reqID}, "action": {"approve"}})
 	checkHTMLError(t, resp, http.StatusBadRequest)
+}
+
+// Two approvals that both got past the AuthRequest lookup (a double
+// click, or a racing replay) must not both get a code.
+func TestIssueCodeOnlyOnce(t *testing.T) {
+	srv, ts, fake := newTestServer(t)
+	id := registerClient(t, ts, claudeRedirect)
+	fake.SetUser("cozmin", 1)
+	_, body := login(t, newBrowser(t), ts, fake, id, claudeRedirect)
+	ar, err := srv.store.GetAuthRequest(context.Background(), consentRequestID(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	codes := 0
+	for range 2 {
+		w := httptest.NewRecorder()
+		srv.issueCode(w, httptest.NewRequest(http.MethodPost, "/oauth/consent", nil), ar)
+		if loc, _ := url.Parse(w.Header().Get("Location")); w.Code == http.StatusFound && loc.Query().Get("code") != "" {
+			codes++
+		} else if w.Code != http.StatusBadRequest {
+			t.Errorf("second issue: status %d, want 400", w.Code)
+		}
+	}
+	if codes != 1 {
+		t.Fatalf("issued %d codes, want 1", codes)
+	}
+}
+
+func TestConsentConcurrentApprovals(t *testing.T) {
+	_, ts, fake := newTestServer(t)
+	id := registerClient(t, ts, claudeRedirect)
+	fake.SetUser("cozmin", 1)
+	c := newBrowser(t)
+	_, body := login(t, c, ts, fake, id, claudeRedirect)
+	reqID := consentRequestID(t, body)
+	const n = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	codes := 0
+	for range n {
+		wg.Go(func() {
+			// Each request carries the cookie, as a double submit would.
+			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/oauth/consent",
+				strings.NewReader(url.Values{"request": {reqID}, "action": {"approve"}}.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.AddCookie(&http.Cookie{Name: authCookie, Value: reqID})
+			resp, err := http.DefaultTransport.RoundTrip(req)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			resp.Body.Close()
+			if loc, _ := url.Parse(resp.Header.Get("Location")); loc != nil && loc.Query().Get("code") != "" {
+				mu.Lock()
+				codes++
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+	if codes != 1 {
+		t.Fatalf("issued %d codes for one authorization, want 1", codes)
+	}
 }
 
 func TestConsentDeny(t *testing.T) {

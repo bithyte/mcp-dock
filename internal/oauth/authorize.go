@@ -323,14 +323,27 @@ func (s *Server) handleConsent(w http.ResponseWriter, r *http.Request) {
 // issueCode finishes an authorization: it stores the code's hash, drops the
 // AuthRequest and cookie, and redirects to the client with code, state and
 // iss (RFC 9207).
-func (s *Server) issueCode(w http.ResponseWriter, r *http.Request, ar *store.AuthRequest) {
-	// Delete first so the AuthRequest can't be reused if saving fails.
-	if err := s.store.DeleteAuthRequest(r.Context(), ar.ID); err != nil {
-		s.serverError(w, "auth request delete failed", err)
+func (s *Server) issueCode(w http.ResponseWriter, r *http.Request, checked *store.AuthRequest) {
+	// Claim the AuthRequest first, atomically, so two approvals racing past
+	// boundRequest can't both get a code, and a failed save can't be
+	// retried with it. The loser sees the expired-link page.
+	ar, err := s.store.ConsumeAuthRequest(r.Context(), checked.ID, s.now())
+	if errors.Is(err, store.ErrNotFound) {
+		s.badLink(w)
+		return
+	}
+	if err != nil {
+		s.serverError(w, "auth request claim failed", err)
+		return
+	}
+	if ar.Login == "" || ar.Login != checked.Login {
+		// The login the caller checked against the allowlist must be the
+		// one the code is issued to.
+		s.badLink(w)
 		return
 	}
 	code := newSecret()
-	err := s.store.SaveCode(r.Context(), store.Code{
+	err = s.store.SaveCode(r.Context(), store.Code{
 		Hash:          hashSecret(code),
 		ClientID:      ar.ClientID,
 		RedirectURI:   ar.RedirectURI,
