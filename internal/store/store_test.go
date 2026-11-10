@@ -161,9 +161,10 @@ func TestResetUser(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 	s.SetGitHubID(ctx, "Bob", 5)
-	s.SaveConsent(ctx, "bob", "c")
+	s.SaveConsent(ctx, "bob", "c", "https://a.example/cb")
+	s.SaveConsent(ctx, "bob", "c", "https://b.example/cb")
 	s.SaveToken(ctx, Token{Hash: "t", Kind: "access", Login: "BOB", ExpiresAt: now.Add(time.Hour)})
-	if has, _ := s.HasConsent(ctx, "BOB", "c"); !has {
+	if has, _ := s.HasConsent(ctx, "BOB", "c", "https://a.example/cb"); !has {
 		t.Fatal("consent missing")
 	}
 	if err := s.ResetUser(ctx, "Bob"); err != nil {
@@ -172,11 +173,46 @@ func TestResetUser(t *testing.T) {
 	if _, ok, _ := s.GitHubID(ctx, "bob"); ok {
 		t.Fatal("id remains")
 	}
-	if has, _ := s.HasConsent(ctx, "bob", "c"); has {
-		t.Fatal("consent remains")
+	for _, u := range []string{"https://a.example/cb", "https://b.example/cb"} {
+		if has, _ := s.HasConsent(ctx, "bob", "c", u); has {
+			t.Fatalf("consent for %s remains", u)
+		}
 	}
 	if _, err := s.GetToken(ctx, "t", now); !errors.Is(err, ErrNotFound) {
 		t.Fatal(err)
+	}
+}
+
+func TestConsentPerRedirectURI(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	const a, b = "https://claude.ai/api/mcp/auth_callback", "https://evil.example/cb"
+	if err := s.SaveConsent(ctx, "Bob", "c", a); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveConsent(ctx, "bob", "c", a); err != nil { // idempotent
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		login, client, uri string
+		want               bool
+	}{
+		{"bob", "c", a, true},
+		{"BOB", "c", a, true},
+		{"bob", "c", b, false},
+		{"bob", "other", a, false},
+		{"alice", "c", a, false},
+		{"bob", "c", "", false},
+	} {
+		if has, err := s.HasConsent(ctx, tc.login, tc.client, tc.uri); err != nil || has != tc.want {
+			t.Errorf("HasConsent(%q,%q,%q) = %v, %v; want %v", tc.login, tc.client, tc.uri, has, err, tc.want)
+		}
+	}
+	if err := s.SaveConsent(ctx, "bob", "c", b); err != nil {
+		t.Fatal(err)
+	}
+	if has, _ := s.HasConsent(ctx, "bob", "c", b); !has {
+		t.Fatal("second URI consent missing")
 	}
 }
 

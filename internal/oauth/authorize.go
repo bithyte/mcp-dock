@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/bithyte/mcp-dock/internal/config"
 	"github.com/bithyte/mcp-dock/internal/store"
+	"golang.org/x/net/idna"
 )
 
 const (
@@ -246,7 +248,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	ar.Login, ar.GitHubID = strings.ToLower(user.Login), user.ID
 
-	consented, err := s.store.HasConsent(r.Context(), ar.Login, ar.ClientID)
+	consented, err := s.store.HasConsent(r.Context(), ar.Login, ar.ClientID, consentKey(ar.RedirectURI))
 	if err != nil {
 		s.serverError(w, "consent lookup failed", err)
 		return
@@ -308,7 +310,7 @@ func (s *Server) handleConsent(w http.ResponseWriter, r *http.Request) {
 			s.notAllowed(w, ar.Login)
 			return
 		}
-		if err := s.store.SaveConsent(r.Context(), ar.Login, ar.ClientID); err != nil {
+		if err := s.store.SaveConsent(r.Context(), ar.Login, ar.ClientID, consentKey(ar.RedirectURI)); err != nil {
 			s.serverError(w, "consent save failed", err)
 			return
 		}
@@ -432,21 +434,85 @@ func appendQuery(uri string, v url.Values) string {
 	return uri + sep + v.Encode()
 }
 
+// consentKey is the redirect URI a remembered consent is bound to. One
+// client may register several redirect URIs, and approving one must not
+// approve the others, or a client could get consent for a legit redirect
+// and later skip the page for its own. Loopback http URIs drop the port,
+// matching redirectAllowed (native apps pick a port per run); everything
+// else is the exact string.
+func consentKey(redirect string) string {
+	u, err := url.Parse(redirect)
+	if err != nil || u.Scheme != "http" || !isLoopback(u) {
+		return redirect
+	}
+	k := *u
+	k.Host = u.Hostname()
+	if strings.Contains(k.Host, ":") {
+		k.Host = "[" + k.Host + "]"
+	}
+	return k.String()
+}
+
 // redirectDisplay is what the consent page shows as the destination: the
-// host for https, scheme and host for others (loopback, app schemes).
+// host for https, scheme and host for others (loopback, app schemes). The
+// host is always ASCII, so a lookalike IDN host shows as xn--... and not as
+// the domain it imitates.
 func redirectDisplay(uri string) string {
 	u, err := url.Parse(uri)
 	if err != nil {
-		return uri
+		return asciiOnly(uri)
 	}
+	host := asciiHost(u)
 	switch {
 	case u.Scheme == "https":
-		return u.Host
-	case u.Host != "":
-		return u.Scheme + "://" + u.Host
+		return host
+	case host != "":
+		return u.Scheme + "://" + host
 	default:
 		return u.Scheme + ": (app on this device)"
 	}
+}
+
+// asciiHost returns u.Host with the hostname in IDNA ASCII (punycode) form.
+func asciiHost(u *url.URL) string {
+	name := u.Hostname()
+	if !isASCII(name) {
+		a, err := idna.Lookup.ToASCII(name)
+		if err != nil || !isASCII(a) {
+			// Not a valid IDN; show the escaped bytes rather than the glyphs.
+			a = asciiOnly(name)
+		}
+		name = a
+	}
+	if strings.Contains(name, ":") {
+		name = "[" + name + "]"
+	}
+	if p := u.Port(); p != "" {
+		name += ":" + p
+	}
+	return name
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// asciiOnly percent-escapes every non-ASCII byte.
+func asciiOnly(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= 0x80 {
+			b.WriteString("%" + strings.ToUpper(hex.EncodeToString([]byte{c})))
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 func (s *Server) secureCookies() bool {

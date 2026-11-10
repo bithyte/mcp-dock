@@ -151,14 +151,19 @@ func (s *Store) ConsumeRefreshToken(ctx context.Context, hash string, now time.T
 		hash, ts(now)))
 }
 
-func (s *Store) HasConsent(ctx context.Context, login, clientID string) (bool, error) {
+// HasConsent reports whether login approved clientID for redirectURI.
+// redirectURI is compared as an exact string; callers pass a canonical key
+// (the oauth package drops loopback ports).
+func (s *Store) HasConsent(ctx context.Context, login, clientID, redirectURI string) (bool, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM consents WHERE login=? AND client_id=?`, norm(login), clientID).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM consents WHERE login=? AND client_id=? AND redirect_uri=?`,
+		norm(login), clientID, redirectURI).Scan(&n)
 	return n > 0, err
 }
 
-func (s *Store) SaveConsent(ctx context.Context, login, clientID string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO consents (login, client_id) VALUES (?,?)`, norm(login), clientID)
+func (s *Store) SaveConsent(ctx context.Context, login, clientID, redirectURI string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO consents (login, client_id, redirect_uri) VALUES (?,?,?)`,
+		norm(login), clientID, redirectURI)
 	return err
 }
 

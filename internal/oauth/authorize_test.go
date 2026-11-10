@@ -47,11 +47,11 @@ func registerClient(t *testing.T, ts *httptest.Server, redirect string) string {
 	return registerNamedClient(t, ts, testClient, redirect)
 }
 
-func registerNamedClient(t *testing.T, ts *httptest.Server, name, redirect string) string {
+func registerNamedClient(t *testing.T, ts *httptest.Server, name string, redirects ...string) string {
 	t.Helper()
 	resp, m := postJSON(t, ts.URL+"/register", map[string]any{
 		"client_name":                name,
-		"redirect_uris":              []string{redirect},
+		"redirect_uris":              redirects,
 		"token_endpoint_auth_method": "none",
 	})
 	if resp.StatusCode != http.StatusCreated {
@@ -523,7 +523,7 @@ func TestConsentApproveIssuesCode(t *testing.T) {
 	if _, err := srv.store.GetAuthRequest(ctx, reqID); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("auth request not deleted: %v", err)
 	}
-	if ok, _ := srv.store.HasConsent(ctx, "cozmin", id); !ok {
+	if ok, _ := srv.store.HasConsent(ctx, "cozmin", id, claudeRedirect); !ok {
 		t.Error("consent not saved")
 	}
 	if gid, ok, _ := srv.store.GitHubID(ctx, "cozmin"); !ok || gid != 1 {
@@ -546,7 +546,7 @@ func TestConsentDeny(t *testing.T) {
 	if q.Get("error") != "access_denied" || q.Get("state") != testState || q.Get("iss") != ts.URL || q.Get("code") != "" {
 		t.Fatalf("query %v", q)
 	}
-	if ok, _ := srv.store.HasConsent(context.Background(), "cozmin", id); ok {
+	if ok, _ := srv.store.HasConsent(context.Background(), "cozmin", id, claudeRedirect); ok {
 		t.Error("consent saved on deny")
 	}
 }
@@ -609,6 +609,77 @@ func TestConsentRemembered(t *testing.T) {
 	}
 }
 
+// approve runs a full login and approves the consent page.
+func approve(t *testing.T, c *http.Client, ts *httptest.Server, fake *testutil.FakeGitHub, clientID, redirect string) {
+	t.Helper()
+	resp, body := login(t, c, ts, fake, clientID, redirect)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected consent page, got %d", resp.StatusCode)
+	}
+	resp, _ = postForm(t, c, ts.URL+"/oauth/consent", url.Values{"request": {consentRequestID(t, body)}, "action": {"approve"}})
+	if q := redirectQuery(t, resp, redirect); q.Get("code") == "" {
+		t.Fatalf("approve: %v", q)
+	}
+}
+
+func TestConsentRememberedPerRedirectURI(t *testing.T) {
+	_, ts, fake := newTestServer(t)
+	const evil = "https://evil.example/cb"
+	id := registerNamedClient(t, ts, "Claude", claudeRedirect, evil)
+	fake.SetUser("cozmin", 1)
+	c := newBrowser(t)
+	approve(t, c, ts, fake, id, claudeRedirect)
+
+	// Same client, other registered redirect: consent is asked again and
+	// no code goes to the other URI.
+	resp, body := login(t, c, ts, fake, id, evil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `value="approve"`) || !strings.Contains(body, "evil.example") {
+		t.Fatalf("other redirect skipped consent: status %d Location %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+
+	// The approved URI is still remembered.
+	resp, _ = login(t, c, ts, fake, id, claudeRedirect)
+	if q := redirectQuery(t, resp, claudeRedirect); q.Get("code") == "" {
+		t.Fatalf("approved redirect not remembered: %v", q)
+	}
+}
+
+func TestConsentRememberedLoopbackAnyPort(t *testing.T) {
+	_, ts, fake := newTestServer(t)
+	id := registerNamedClient(t, ts, "cli", "http://127.0.0.1:1111/cb", "http://127.0.0.1/other")
+	fake.SetUser("cozmin", 1)
+	c := newBrowser(t)
+	approve(t, c, ts, fake, id, "http://127.0.0.1:2222/cb")
+
+	resp, _ := login(t, c, ts, fake, id, "http://127.0.0.1:3333/cb")
+	if q := redirectQuery(t, resp, "http://127.0.0.1:3333/cb"); q.Get("code") == "" {
+		t.Fatalf("loopback port change not remembered: %v", q)
+	}
+	// A different loopback path is a different redirect.
+	resp, _ = login(t, c, ts, fake, id, "http://127.0.0.1:2222/other")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("other loopback path skipped consent: %d %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+}
+
+func TestConsentShowsHomographHostAsPunycode(t *testing.T) {
+	_, ts, fake := newTestServer(t)
+	// %D0%B0 is Cyrillic small a (U+0430): "аpple.com" looks like apple.com.
+	redirect := "https://%D0%B0pple.com/cb"
+	id := registerClient(t, ts, redirect)
+	fake.SetUser("cozmin", 1)
+	resp, body := login(t, newBrowser(t), ts, fake, id, redirect)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if !strings.Contains(body, "xn--pple-43d.com") {
+		t.Errorf("punycode host missing: %s", body)
+	}
+	if strings.Contains(body, "\u0430pple.com") {
+		t.Errorf("unicode lookalike host shown: %s", body)
+	}
+}
+
 func TestGitHubIDMismatchDenied(t *testing.T) {
 	srv, ts, fake, logs := newTestServerLogs(t)
 	id := registerClient(t, ts, claudeRedirect)
@@ -659,5 +730,21 @@ func TestLoginCaseInsensitive(t *testing.T) {
 	resp, body := login(t, newBrowser(t), ts, fake, id, claudeRedirect)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `value="approve"`) {
 		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+}
+
+func TestConsentKey(t *testing.T) {
+	for in, want := range map[string]string{
+		claudeRedirect:                   claudeRedirect,
+		"https://claude.ai:443/cb":       "https://claude.ai:443/cb",
+		"http://127.0.0.1:2222/cb?x=1":   "http://127.0.0.1/cb?x=1",
+		"http://localhost:6274/callback": "http://localhost/callback",
+		"http://[::1]:9/cb":              "http://[::1]/cb",
+		"http://127.0.0.1/cb":            "http://127.0.0.1/cb",
+		"cursor://anysphere.cursor/cb":   "cursor://anysphere.cursor/cb",
+	} {
+		if got := consentKey(in); got != want {
+			t.Errorf("consentKey(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

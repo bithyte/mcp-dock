@@ -59,7 +59,8 @@ CREATE INDEX IF NOT EXISTS tokens_login ON tokens(login);
 CREATE TABLE IF NOT EXISTS consents (
 	login TEXT NOT NULL,
 	client_id TEXT NOT NULL,
-	PRIMARY KEY (login, client_id)
+	redirect_uri TEXT NOT NULL,
+	PRIMARY KEY (login, client_id, redirect_uri)
 );
 CREATE TABLE IF NOT EXISTS users (
 	login TEXT PRIMARY KEY,
