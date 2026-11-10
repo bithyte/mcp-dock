@@ -267,10 +267,10 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		name = "Unnamed app"
 	}
 	s.writeHTML(w, http.StatusOK, consentTmpl, consentData{
-		ClientName:   name,
-		RedirectHost: redirectDisplay(ar.RedirectURI),
-		Login:        user.Login,
-		RequestID:    ar.ID,
+		ClientName: name,
+		Redirect:   redirectDisplay(ar.RedirectURI),
+		Login:      user.Login,
+		RequestID:  ar.ID,
 	})
 }
 
@@ -466,24 +466,18 @@ func consentKey(redirect string) string {
 	return k.String()
 }
 
-// redirectDisplay is what the consent page shows as the destination: the
-// host for https, scheme and host for others (loopback, app schemes). The
-// host is always ASCII, so a lookalike IDN host shows as xn--... and not as
-// the domain it imitates.
+// redirectDisplay is what the consent page shows as the destination. For
+// https it's the host, always in ASCII, so a lookalike IDN host shows as
+// xn--... and not as the domain it imitates. For every other scheme
+// (loopback http, app schemes) it's the whole URI: the host alone, or
+// generic text, would hide where an opaque URI sends the code. Registered
+// URIs are printable ASCII; the template HTML-escapes the result.
 func redirectDisplay(uri string) string {
 	u, err := url.Parse(uri)
-	if err != nil {
+	if err != nil || u.Scheme != "https" {
 		return asciiOnly(uri)
 	}
-	host := asciiHost(u)
-	switch {
-	case u.Scheme == "https":
-		return host
-	case host != "":
-		return u.Scheme + "://" + host
-	default:
-		return u.Scheme + ": (app on this device)"
-	}
+	return asciiHost(u)
 }
 
 // asciiHost returns u.Host with the hostname in IDNA ASCII (punycode) form.

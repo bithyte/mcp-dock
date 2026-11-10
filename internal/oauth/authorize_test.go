@@ -750,6 +750,45 @@ func TestConsentShowsHomographHostAsPunycode(t *testing.T) {
 	}
 }
 
+// For anything but https the consent page shows the whole redirect URI,
+// so an app scheme can't hide where the code goes behind generic text.
+func TestConsentShowsFullNonHTTPSRedirect(t *testing.T) {
+	_, ts, fake := newTestServer(t)
+	fake.SetUser("cozmin", 1)
+	for redirect, want := range map[string]string{
+		"com.example.app:/oauth2redirect?a=1&b=<x>": "com.example.app:/oauth2redirect?a=1&amp;b=&lt;x&gt;",
+		"cursor://anysphere.cursor/cb?x=1":          "cursor://anysphere.cursor/cb?x=1",
+		"http://127.0.0.1:2222/cb":                  "http://127.0.0.1:2222/cb",
+	} {
+		id := registerClient(t, ts, redirect)
+		resp, body := login(t, newBrowser(t), ts, fake, id, redirect)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status %d", redirect, resp.StatusCode)
+		}
+		if !strings.Contains(body, "<strong>"+want+"</strong>") {
+			t.Errorf("%s: full redirect %q not shown: %s", redirect, want, body)
+		}
+		if strings.Contains(body, "app on this device") {
+			t.Errorf("%s: generic text shown", redirect)
+		}
+	}
+}
+
+func TestRedirectDisplay(t *testing.T) {
+	for in, want := range map[string]string{
+		claudeRedirect:                       "claude.ai",
+		"https://claude.ai:8443/cb?x=1":      "claude.ai:8443",
+		"http://localhost:6274/cb":           "http://localhost:6274/cb",
+		"com.example.app:/cb":                "com.example.app:/cb",
+		"vscode://vscode.github-auth/did?x=": "vscode://vscode.github-auth/did?x=",
+		"x-app:opaque-data":                  "x-app:opaque-data",
+	} {
+		if got := redirectDisplay(in); got != want {
+			t.Errorf("redirectDisplay(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestGitHubIDMismatchDenied(t *testing.T) {
 	srv, ts, fake, logs := newTestServerLogs(t)
 	id := registerClient(t, ts, claudeRedirect)

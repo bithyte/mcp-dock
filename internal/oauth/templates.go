@@ -24,7 +24,7 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 <p>Signed in with GitHub as <strong>{{.Login}}</strong>.</p>
 <div class="box">
 <p>The application <strong>{{.ClientName}}</strong> wants to use the tools on this gateway as you.</p>
-<p>If you approve, you'll be sent back to <strong>{{.RedirectHost}}</strong>.</p>
+<p>If you approve, you'll be sent back to <strong>{{.Redirect}}</strong>.</p>
 </div>
 <p>Only approve if you started this from an app you trust and recognize that address.</p>
 <form method="post" action="/oauth/consent">
@@ -45,7 +45,7 @@ var errorTmpl = template.Must(template.New("error").Parse(`<!doctype html>
 `))
 
 type consentData struct {
-	ClientName, RedirectHost, Login, RequestID string
+	ClientName, Redirect, Login, RequestID string
 }
 
 type errorData struct {

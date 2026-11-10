@@ -33,12 +33,15 @@ var (
 	loopbackHost = regexp.MustCompile(`^(localhost|127\.0\.0\.1|\[::1\])(:[0-9]{1,5})?$`)
 
 	// deniedSchemes are never accepted as custom app schemes: they run code
-	// in the browser, read local or browser-internal content, or send the
-	// code to a remote network host.
+	// in the browser, read local or browser-internal content, send the code
+	// to a remote network host or person (mail, SMS, phone), launch
+	// arbitrary Android apps (intent), or hand it to a browser extension.
 	deniedSchemes = map[string]bool{
 		"javascript": true, "data": true, "file": true, "vbscript": true,
 		"about": true, "blob": true, "filesystem": true, "view-source": true,
 		"ftp": true, "ws": true, "wss": true,
+		"mailto": true, "sms": true, "tel": true, "intent": true,
+		"chrome-extension": true, "moz-extension": true,
 	}
 )
 
