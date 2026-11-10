@@ -247,6 +247,16 @@ func TestDenyArgs(t *testing.T) {
 	if !res.IsError || !strings.Contains(txt, "attachment.path") || !strings.Contains(txt, "not allowed") {
 		t.Fatalf("result = %+v (%q)", res, txt)
 	}
+	res, err = cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "jaypost__ask_user",
+		Arguments: json.RawMessage(`{"attachment":[{"name":"a"},{"path":"/etc/passwd"}]}`),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError || !strings.Contains(resultText(res), "not allowed") {
+		t.Fatalf("array: result = %+v (%q)", res, resultText(res))
+	}
 	if len(jp.gotCalls()) != 0 {
 		t.Fatalf("backend called: %+v", jp.gotCalls())
 	}

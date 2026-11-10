@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -101,7 +102,13 @@ func TestCheck(t *testing.T) {
 		{`{}`, "", false},
 		{`{"attachment":{"path":null}}`, "attachment.path", false},
 		{`{"attachment":null}`, "", false},
-		{`{"attachment":[{"path":"x"}]}`, "", false},
+		{`{"attachment":[{"path":"x"}]}`, "attachment.path", false},
+		{`{"attachment":[{"text":"x"},{"PATH":1}]}`, "attachment.path", false},
+		{`{"attachment":[[{"path":"x"}]]}`, "attachment.path", false},
+		{`{"attachment":[[],[[{"text":"t"}],[{"path":null}]]]}`, "attachment.path", false},
+		{`{"attachment":[1,"s",null,true,{"text":"x"},[]]}`, "", false},
+		{`{"attachment":[]}`, "", false},
+		{`[{"attachment":{"path":"x"}}]`, "attachment.path", false},
 		{`[1,2]`, "", false},
 		{`"s"`, "", false},
 		{`42`, "", false},
@@ -154,13 +161,78 @@ func TestNewArgPolicyIgnoresMalformed(t *testing.T) {
 
 func TestUnmatched(t *testing.T) {
 	js := parse(t, jaypostSchema)
-	p := NewArgPolicy([]string{"attachment.path", "attachment.pth", "Text", "nope"})
-	got := p.Unmatched([]any{js, nil, "junk"})
+	arr := parse(t, `{"type":"object","properties":{"files":{"type":"array","items":{"type":"object","properties":{"path":{}}}}}}`)
+	p := NewArgPolicy([]string{"attachment.path", "attachment.pth", "files.path", "Text", "nope"})
+	got := p.Unmatched([]any{js, arr, nil, "junk"})
 	want := []string{"attachment.pth", "nope"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Unmatched = %q, want %q", got, want)
 	}
-	if got := p.Unmatched(nil); len(got) != 4 {
+	if got := p.Unmatched(nil); len(got) != 5 {
 		t.Fatalf("no schemas: %q", got)
+	}
+}
+
+func TestStripSchemaInItems(t *testing.T) {
+	s := parse(t, `{"type":"object","properties":{
+	  "attachment":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"text":{}},"required":["path"]}},
+	  "nested":{"type":"array","items":{"type":"array","items":{"type":"object","properties":{"path":{},"keep":{}}}}},
+	  "tuple":{"type":"array","prefixItems":[{"type":"object","properties":{"path":{}}},{"type":"string"}]},
+	  "old":{"type":"array","items":[{"type":"object","properties":{"path":{}}}]}}}`)
+	p := NewArgPolicy([]string{"attachment.path", "nested.path", "tuple.path", "old.path"})
+	out := p.StripSchema(s).(map[string]any)
+	props := out["properties"].(map[string]any)
+	sub := func(m any, keys ...any) map[string]any {
+		for _, k := range keys {
+			switch k := k.(type) {
+			case string:
+				m = m.(map[string]any)[k]
+			case int:
+				m = m.([]any)[k]
+			}
+		}
+		return m.(map[string]any)
+	}
+	att := sub(props, "attachment", "items")
+	if _, ok := sub(att, "properties")["path"]; ok {
+		t.Fatal("attachment items path still present")
+	}
+	if _, ok := att["required"]; ok {
+		t.Fatal("required should be removed")
+	}
+	inner := sub(props, "nested", "items", "items", "properties")
+	if _, ok := inner["path"]; ok {
+		t.Fatal("nested items path still present")
+	}
+	if _, ok := inner["keep"]; !ok {
+		t.Fatal("keep missing")
+	}
+	if _, ok := sub(props, "tuple", "prefixItems", 0, "properties")["path"]; ok {
+		t.Fatal("prefixItems path still present")
+	}
+	if _, ok := sub(props, "old", "items", 0, "properties")["path"]; ok {
+		t.Fatal("array-form items path still present")
+	}
+	// odd shapes must not panic
+	for _, odd := range []any{
+		map[string]any{"properties": map[string]any{"attachment": map[string]any{"items": "x", "prefixItems": 3.0}}},
+		map[string]any{"properties": map[string]any{"attachment": map[string]any{"items": []any{"x", nil}}}},
+	} {
+		p.StripSchema(odd)
+		p.Unmatched([]any{odd})
+	}
+}
+
+func TestCheckDeepArrays(t *testing.T) {
+	p := NewArgPolicy([]string{"attachment.path"})
+	// Deep but within json.Valid's nesting limit: walked, found.
+	deep := `{"attachment":` + strings.Repeat("[", 5000) + `{"path":1}` + strings.Repeat("]", 5000) + `}`
+	if d, err := p.Check(json.RawMessage(deep)); d != "attachment.path" || err != nil {
+		t.Fatalf("deep: (%q,%v)", d, err)
+	}
+	// Past the limit: rejected as invalid before any walking.
+	tooDeep := `{"attachment":` + strings.Repeat("[", 20000) + strings.Repeat("]", 20000) + `}`
+	if _, err := p.Check(json.RawMessage(tooDeep)); err == nil {
+		t.Fatal("too deep: want error")
 	}
 }

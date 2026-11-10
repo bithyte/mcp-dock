@@ -88,21 +88,38 @@ func stripNode(node any, segs []string) {
 			stripNode(child, segs[1:])
 		}
 	}
-	for _, k := range []string{"anyOf", "oneOf", "allOf"} {
+	for _, sub := range sameLevel(m) {
+		stripNode(sub, segs)
+	}
+}
+
+// sameLevel returns the subschemas of m that a path continues into without
+// consuming a segment: anyOf/oneOf/allOf branches, and array element
+// schemas (items, in object or array form, and prefixItems), since Check
+// looks inside every array element.
+func sameLevel(m map[string]any) []any {
+	var out []any
+	for _, k := range []string{"anyOf", "oneOf", "allOf", "prefixItems"} {
 		if arr, ok := m[k].([]any); ok {
-			for _, branch := range arr {
-				stripNode(branch, segs)
-			}
+			out = append(out, arr...)
 		}
 	}
+	switch it := m["items"].(type) {
+	case map[string]any:
+		out = append(out, it)
+	case []any:
+		out = append(out, it...)
+	}
+	return out
 }
 
 // Check returns the first denied path present in args, or "" if allowed.
 // A key counts as present even when its value is null. Keys match
 // case-insensitively and every occurrence of a duplicate key is inspected,
 // because upstream parsers may differ on case and on first/last-wins.
-// Non-object values along a path are not denied. err is returned only for
-// invalid JSON.
+// Arrays along a path are looked through: each element is checked against
+// the rest of the path. Scalars along a path are not denied. err is
+// returned only for invalid JSON.
 func (p ArgPolicy) Check(args json.RawMessage) (denied string, err error) {
 	if len(bytes.TrimSpace(args)) == 0 {
 		return "", nil
@@ -124,7 +141,9 @@ func (p ArgPolicy) Check(args json.RawMessage) (denied string, err error) {
 }
 
 // walk consumes exactly one JSON value from dec and reports whether the
-// remaining path segs resolves to a present key anywhere inside it.
+// remaining path segs resolves to a present key inside it, looking through
+// arrays at any level. Recursion depth is bounded by the JSON nesting depth,
+// which json.Valid in Check has already limited.
 // With empty segs it just consumes the value.
 func walk(dec *json.Decoder, segs []string) (bool, error) {
 	tok, err := dec.Token()
@@ -162,10 +181,15 @@ func walk(dec *json.Decoder, segs []string) (bool, error) {
 			}
 		}
 	case '[':
+		// Every element is checked with the same remaining path, so
+		// {"attachment":[{"path":...}]} is denied. This can over-block a
+		// tool whose schema has no array there, which is the safe side.
 		for dec.More() {
-			if _, err := walk(dec, nil); err != nil {
+			f, err := walk(dec, segs)
+			if err != nil {
 				return false, err
 			}
+			found = found || f
 		}
 	}
 	if _, err := dec.Token(); err != nil { // closing delimiter
@@ -197,7 +221,7 @@ func (p ArgPolicy) Unmatched(schemas []any) []string {
 }
 
 // schemaHas reports whether segs names a property in schema, looking
-// through properties and anyOf/oneOf/allOf branches.
+// through properties and the subschemas sameLevel returns.
 func schemaHas(node any, segs []string) bool {
 	m, ok := node.(map[string]any)
 	if !ok || len(segs) == 0 {
@@ -210,13 +234,9 @@ func schemaHas(node any, segs []string) bool {
 			}
 		}
 	}
-	for _, k := range []string{"anyOf", "oneOf", "allOf"} {
-		if arr, ok := m[k].([]any); ok {
-			for _, branch := range arr {
-				if schemaHas(branch, segs) {
-					return true
-				}
-			}
+	for _, sub := range sameLevel(m) {
+		if schemaHas(sub, segs) {
+			return true
 		}
 	}
 	return false
