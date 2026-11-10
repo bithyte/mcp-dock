@@ -136,3 +136,31 @@ func TestCheckEmptyPolicy(t *testing.T) {
 		t.Fatal(d, err)
 	}
 }
+
+func TestNewArgPolicyIgnoresMalformed(t *testing.T) {
+	bad := []string{"", ".", "..", "a..b", "attachment.", ".path", " attachment.path",
+		"attachment.path ", "attachment. path", "attach ment.path", "a.\tb", "a.b\x00", "a.\x7f"}
+	p := NewArgPolicy(bad)
+	if len(p.paths) != 0 {
+		t.Fatalf("paths = %q, want none", p.paths)
+	}
+	if d, err := p.Check(json.RawMessage(`{"attachment":{"path":"x"}}`)); d != "" || err != nil {
+		t.Fatal(d, err)
+	}
+	if got := NewArgPolicy([]string{"attachment.path", "a-b.c_d"}).paths; len(got) != 2 {
+		t.Fatalf("valid paths dropped: %q", got)
+	}
+}
+
+func TestUnmatched(t *testing.T) {
+	js := parse(t, jaypostSchema)
+	p := NewArgPolicy([]string{"attachment.path", "attachment.pth", "Text", "nope"})
+	got := p.Unmatched([]any{js, nil, "junk"})
+	want := []string{"attachment.pth", "nope"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Unmatched = %q, want %q", got, want)
+	}
+	if got := p.Unmatched(nil); len(got) != 4 {
+		t.Fatalf("no schemas: %q", got)
+	}
+}

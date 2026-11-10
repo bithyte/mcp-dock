@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ArgPolicy denies tool arguments at configured dotted paths.
@@ -12,22 +15,30 @@ type ArgPolicy struct {
 	paths [][]string
 }
 
-// NewArgPolicy parses dotted paths. Blank paths and empty segments are ignored.
+// NewArgPolicy parses dotted paths. A path with an empty segment, or a
+// segment containing whitespace or control characters, is ignored; config
+// validation rejects those before they get here.
 func NewArgPolicy(paths []string) ArgPolicy {
 	var p ArgPolicy
 	for _, s := range paths {
 		segs := strings.Split(s, ".")
-		valid := true
-		for _, seg := range segs {
-			if seg == "" {
-				valid = false
-			}
-		}
-		if valid {
+		if !slices.ContainsFunc(segs, badSegment) {
 			p.paths = append(p.paths, segs)
 		}
 	}
 	return p
+}
+
+func badSegment(seg string) bool {
+	if seg == "" {
+		return true
+	}
+	for _, r := range seg {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || r == utf8.RuneError {
+			return true
+		}
+	}
+	return false
 }
 
 // StripSchema returns a deep copy of schema with denied paths removed.
@@ -161,4 +172,52 @@ func walk(dec *json.Decoder, segs []string) (bool, error) {
 		return false, err
 	}
 	return found, nil
+}
+
+// Unmatched returns the denied paths, in policy order, that name no
+// property in any of schemas. Segments match case-insensitively, as in
+// Check. Such a path is probably a typo in deny_args.
+func (p ArgPolicy) Unmatched(schemas []any) []string {
+	norm := make([]any, 0, len(schemas))
+	for _, s := range schemas {
+		if b, err := json.Marshal(s); err == nil {
+			var cp any
+			if json.Unmarshal(b, &cp) == nil {
+				norm = append(norm, cp)
+			}
+		}
+	}
+	var out []string
+	for _, segs := range p.paths {
+		if !slices.ContainsFunc(norm, func(s any) bool { return schemaHas(s, segs) }) {
+			out = append(out, strings.Join(segs, "."))
+		}
+	}
+	return out
+}
+
+// schemaHas reports whether segs names a property in schema, looking
+// through properties and anyOf/oneOf/allOf branches.
+func schemaHas(node any, segs []string) bool {
+	m, ok := node.(map[string]any)
+	if !ok || len(segs) == 0 {
+		return false
+	}
+	if props, ok := m["properties"].(map[string]any); ok {
+		for k, child := range props {
+			if strings.EqualFold(k, segs[0]) && (len(segs) == 1 || schemaHas(child, segs[1:])) {
+				return true
+			}
+		}
+	}
+	for _, k := range []string{"anyOf", "oneOf", "allOf"} {
+		if arr, ok := m[k].([]any); ok {
+			for _, branch := range arr {
+				if schemaHas(branch, segs) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

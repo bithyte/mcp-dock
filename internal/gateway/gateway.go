@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,8 +46,9 @@ type Gateway struct {
 	log      *slog.Logger
 	srv      *mcp.Server
 
-	mu      sync.Mutex        // serializes Sync
-	current map[string]string // exposed name -> fingerprint of what's registered
+	mu        sync.Mutex        // serializes Sync
+	current   map[string]string // exposed name -> fingerprint of what's registered
+	unmatched map[string]string // backend name -> unmatched deny paths last warned about
 }
 
 // progressBuffer is how many progress notifications per call may wait for
@@ -59,10 +61,11 @@ func New(opts Options) *Gateway {
 		log = slog.Default()
 	}
 	g := &Gateway{
-		backends: slices.Clone(opts.Backends),
-		policies: opts.Policies,
-		log:      log,
-		current:  map[string]string{},
+		backends:  slices.Clone(opts.Backends),
+		policies:  opts.Policies,
+		log:       log,
+		current:   map[string]string{},
+		unmatched: map[string]string{},
 	}
 	g.srv = mcp.NewServer(&mcp.Implementation{Name: "mcp-dock", Version: opts.Version}, &mcp.ServerOptions{
 		Logger: log,
@@ -95,7 +98,9 @@ func (g *Gateway) Sync() {
 	var order []string
 	for _, b := range g.backends {
 		pol := g.policies[b.Name()]
-		for _, t := range b.Tools() {
+		tools := b.Tools()
+		g.warnUnmatched(b.Name(), pol, tools)
+		for _, t := range tools {
 			if t == nil {
 				continue
 			}
@@ -149,6 +154,31 @@ func (g *Gateway) Sync() {
 			continue
 		}
 		g.current[name] = e.fp
+	}
+}
+
+// warnUnmatched logs deny_args paths that name no parameter of any of the
+// backend's tools, which usually means a typo in the config. It stays quiet
+// while the backend is down, and only logs when the set of unmatched paths
+// changes, so repeated Syncs with the same tools don't repeat the warning.
+func (g *Gateway) warnUnmatched(name string, pol ArgPolicy, tools []*mcp.Tool) {
+	if len(tools) == 0 {
+		return
+	}
+	schemas := make([]any, 0, len(tools))
+	for _, t := range tools {
+		if t != nil {
+			schemas = append(schemas, t.InputSchema)
+		}
+	}
+	un := pol.Unmatched(schemas)
+	key := strings.Join(un, "\x00")
+	if key == g.unmatched[name] {
+		return
+	}
+	g.unmatched[name] = key
+	for _, path := range un {
+		g.log.Warn("deny_args path matches no tool parameter", "upstream", name, "path", path)
 	}
 }
 

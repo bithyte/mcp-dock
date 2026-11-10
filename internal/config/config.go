@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -106,12 +108,29 @@ func (c *Config) validate(getenv func(string) string) error {
 			}
 		}
 		for _, d := range up.DenyArgs {
-			if d == "" || strings.Contains(d, "..") {
-				return fmt.Errorf("%s.deny_args entry %q invalid", p, d)
+			if !validDenyPath(d) {
+				return fmt.Errorf("%s.deny_args entry %q invalid: use dot-separated property names with no empty parts, spaces or control characters", p, d)
 			}
 		}
 	}
 	return nil
+}
+
+// validDenyPath reports whether d is a dotted path whose every segment is
+// non-empty and free of whitespace and control characters. A typo such as
+// "attachment." or " attachment.path" would otherwise deny nothing.
+func validDenyPath(d string) bool {
+	for _, seg := range strings.Split(d, ".") {
+		if seg == "" {
+			return false
+		}
+		for _, r := range seg {
+			if unicode.IsSpace(r) || unicode.IsControl(r) || r == utf8.RuneError {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // IsAllowed reports whether login is on the allowlist (case-insensitive).

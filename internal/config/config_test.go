@@ -82,6 +82,14 @@ func TestLoadRejects(t *testing.T) {
 		{"env_from unset", validYAML, "JAYPOST_TOKEN", map[string]string{"GITHUB_CLIENT_SECRET": "s"}},
 		{"deny_args empty", r("[attachment.path]", "[\"\"]").Replace(validYAML), "deny_args", goodEnv},
 		{"deny_args dotdot", r("[attachment.path]", "[a..b]").Replace(validYAML), "deny_args", goodEnv},
+		{"deny_args trailing dot", r("[attachment.path]", "[\"attachment.\"]").Replace(validYAML), "deny_args", goodEnv},
+		{"deny_args leading dot", r("[attachment.path]", "[\".path\"]").Replace(validYAML), "deny_args", goodEnv},
+		{"deny_args leading space", r("[attachment.path]", "[\" attachment.path\"]").Replace(validYAML), "deny_args", goodEnv},
+		{"deny_args trailing space", r("[attachment.path]", "[\"attachment.path \"]").Replace(validYAML), "deny_args", goodEnv},
+		{"deny_args inner space", r("[attachment.path]", "[\"attachment. path\"]").Replace(validYAML), "deny_args", goodEnv},
+		{"deny_args tab", r("[attachment.path]", "[\"attachment.pa\\tth\"]").Replace(validYAML), "deny_args", goodEnv},
+		{"deny_args control", r("[attachment.path]", "[\"attachment.pa\\x01th\"]").Replace(validYAML), "deny_args", goodEnv},
+		{"deny_args dot only", r("[attachment.path]", "[\".\"]").Replace(validYAML), "deny_args", goodEnv},
 		{"unknown field", validYAML + "bogus: 1\n", "bogus", goodEnv},
 	}
 	for _, tc := range cases {
@@ -130,5 +138,16 @@ func TestEnvironMinimal(t *testing.T) {
 		if strings.HasPrefix(kv, "GITHUB_CLIENT_SECRET") {
 			t.Errorf("leaked %q", kv)
 		}
+	}
+}
+
+func TestDenyArgsAccepted(t *testing.T) {
+	y := strings.Replace(validYAML, "[attachment.path]", `[attachment.path, path, "a-b.c_d.Éé"]`, 1)
+	c, err := Load(write(t, y), env(goodEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Upstreams[0].DenyArgs; len(got) != 3 {
+		t.Fatalf("deny_args = %q", got)
 	}
 }

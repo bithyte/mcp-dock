@@ -666,3 +666,38 @@ func findCallRecord(t *testing.T, logs string) map[string]any {
 	t.Fatalf("no tool call record in logs:\n%s", logs)
 	return nil
 }
+
+func TestDenyArgsUnmatchedWarns(t *testing.T) {
+	schema := map[string]any{"type": "object", "properties": map[string]any{
+		"attachment": map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{}}},
+	}}
+	jp := &fakeBackend{name: "jaypost"}
+	log, buf := newLogger()
+	g := New(Options{
+		Backends: []Backend{jp},
+		Policies: map[string]ArgPolicy{"jaypost": NewArgPolicy([]string{"attachment.path", "attachment.pth"})},
+		Logger:   log,
+	})
+	const msg = "deny_args path matches no tool parameter"
+	if strings.Contains(buf.String(), msg) {
+		t.Fatalf("warned while upstream has no tools:\n%s", buf)
+	}
+	jp.setTools([]*mcp.Tool{tool("ask_user", schema)})
+	g.Sync()
+	g.Sync()
+	logs := buf.String()
+	if n := strings.Count(logs, msg); n != 1 {
+		t.Fatalf("got %d warnings, want 1:\n%s", n, logs)
+	}
+	var rec map[string]any
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, msg) {
+			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if rec["level"] != "WARN" || rec["upstream"] != "jaypost" || rec["path"] != "attachment.pth" {
+		t.Fatalf("record = %v", rec)
+	}
+}
