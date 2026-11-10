@@ -1,0 +1,22 @@
+public_url: https://mcp.cozminu.com
+listen: ":8080"
+data_dir: /var/lib/mcp-dock
+
+github:
+  client_id: Iv1.xxxxx
+  client_secret_env: GITHUB_CLIENT_SECRET
+
+allowed_users:
+  - cozmin-github-login
+  - friend-login
+
+upstreams:
+  - name: jaypost
+    command: jaypost
+    args: ["mcp"]
+    env:
+      JAYPOST_URL: http://127.0.0.1:8787
+    env_from:
+      - JAYPOST_TOKEN
+    deny_args:
+      - attachment.path

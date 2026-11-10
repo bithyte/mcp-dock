@@ -1,0 +1,154 @@
+// Package config loads and validates the mcp-dock YAML config.
+package config
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"net/url"
+	"os"
+	"regexp"
+	"sort"
+	"strings"
+
+	"go.yaml.in/yaml/v3"
+)
+
+type Config struct {
+	PublicURL    string           `yaml:"public_url"`
+	Listen       string           `yaml:"listen"`
+	DataDir      string           `yaml:"data_dir"`
+	GitHub       GitHubConfig     `yaml:"github"`
+	AllowedUsers []string         `yaml:"allowed_users"`
+	Upstreams    []UpstreamConfig `yaml:"upstreams"`
+}
+
+type GitHubConfig struct {
+	ClientID        string `yaml:"client_id"`
+	ClientSecretEnv string `yaml:"client_secret_env"`
+	ClientSecret    string `yaml:"-"`
+}
+
+type UpstreamConfig struct {
+	Name     string            `yaml:"name"`
+	Command  string            `yaml:"command"`
+	Args     []string          `yaml:"args"`
+	Env      map[string]string `yaml:"env"`
+	EnvFrom  []string          `yaml:"env_from"`
+	DenyArgs []string          `yaml:"deny_args"`
+}
+
+var nameRe = regexp.MustCompile(`^[a-z0-9]+([_-][a-z0-9]+)*$`)
+
+// NormalizeURL trims trailing slashes.
+func NormalizeURL(s string) string { return strings.TrimRight(s, "/") }
+
+// Load reads, parses and validates the config at path. Secrets are resolved via getenv.
+func Load(path string, getenv func(string) string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	var c Config
+	if err := dec.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if err := c.validate(getenv); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (c *Config) validate(getenv func(string) string) error {
+	c.PublicURL = NormalizeURL(strings.TrimSpace(c.PublicURL))
+	if c.PublicURL == "" {
+		return errors.New("public_url is required")
+	}
+	u, err := url.Parse(c.PublicURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("public_url must be an http(s) URL, got %q", c.PublicURL)
+	}
+	if c.Listen == "" {
+		c.Listen = ":8080"
+	}
+	if c.DataDir == "" {
+		return errors.New("data_dir is required")
+	}
+	if c.GitHub.ClientID == "" {
+		return errors.New("github.client_id is required")
+	}
+	if c.GitHub.ClientSecretEnv == "" {
+		return errors.New("github.client_secret_env is required")
+	}
+	c.GitHub.ClientSecret = getenv(c.GitHub.ClientSecretEnv)
+	if c.GitHub.ClientSecret == "" {
+		return fmt.Errorf("github.client_secret_env: env var %s is empty or unset", c.GitHub.ClientSecretEnv)
+	}
+	seen := map[string]bool{}
+	for i, up := range c.Upstreams {
+		p := fmt.Sprintf("upstreams[%d]", i)
+		if !nameRe.MatchString(up.Name) || strings.Contains(up.Name, "__") {
+			return fmt.Errorf("%s.name %q invalid: use lowercase letters, digits, single _ or -", p, up.Name)
+		}
+		if seen[up.Name] {
+			return fmt.Errorf("%s.name %q is a duplicate", p, up.Name)
+		}
+		seen[up.Name] = true
+		if up.Command == "" {
+			return fmt.Errorf("%s.command is required", p)
+		}
+		for _, v := range up.EnvFrom {
+			if getenv(v) == "" {
+				return fmt.Errorf("%s.env_from: env var %s is empty or unset", p, v)
+			}
+		}
+		for _, d := range up.DenyArgs {
+			if d == "" || strings.Contains(d, "..") {
+				return fmt.Errorf("%s.deny_args entry %q invalid", p, d)
+			}
+		}
+	}
+	return nil
+}
+
+// IsAllowed reports whether login is on the allowlist (case-insensitive).
+func (c *Config) IsAllowed(login string) bool {
+	for _, u := range c.AllowedUsers {
+		if strings.EqualFold(u, login) {
+			return true
+		}
+	}
+	return false
+}
+
+// ResourceURL is the MCP endpoint, also the OAuth resource.
+func (c *Config) ResourceURL() string { return c.PublicURL + "/mcp" }
+
+// Environ builds the minimal upstream process env as "K=V" entries.
+func (u UpstreamConfig) Environ(getenv func(string) string) []string {
+	m := map[string]string{}
+	for _, k := range []string{"PATH", "HOME"} {
+		if v := getenv(k); v != "" {
+			m[k] = v
+		}
+	}
+	for k, v := range u.Env {
+		m[k] = v
+	}
+	for _, k := range u.EnvFrom {
+		m[k] = getenv(k)
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, k+"="+m[k])
+	}
+	return out
+}
