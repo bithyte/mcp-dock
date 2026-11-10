@@ -34,6 +34,7 @@ var version = "dev"
 
 const (
 	readHeaderTimeout = 10 * time.Second
+	idleTimeout       = 2 * time.Minute // idle keep-alive connections
 	shutdownTimeout   = 10 * time.Second
 	cleanupInterval   = time.Hour
 )
@@ -120,6 +121,11 @@ func openStore(cfg *config.Config) (*store.Store, error) {
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
+	// MkdirAll leaves an existing dir's mode alone. The dir holds the
+	// token database, so tighten it.
+	if err := os.Chmod(cfg.DataDir, 0o700); err != nil {
+		return nil, fmt.Errorf("chmod data dir: %w", err)
+	}
 	return store.Open(filepath.Join(cfg.DataDir, "gateway.db"))
 }
 
@@ -156,12 +162,7 @@ func serve(ctx context.Context, cfg *config.Config, getenv func(string) string, 
 		names = append(names, uc.Name)
 	}
 
-	srv := &http.Server{
-		Handler:           a.Handler,
-		ReadHeaderTimeout: readHeaderTimeout,
-		// No WriteTimeout: tool calls can block for hours.
-		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn),
-	}
+	srv := newHTTPServer(a.Handler, log)
 
 	upCtx, cancelUp := context.WithCancel(context.Background())
 	defer cancelUp()
@@ -197,6 +198,16 @@ func serve(ctx context.Context, cfg *config.Config, getenv func(string) string, 
 		log.Info("stopped")
 	}
 	return result
+}
+
+func newHTTPServer(h http.Handler, log *slog.Logger) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
+		// No WriteTimeout or ReadTimeout: tool calls can block for hours.
+		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+	}
 }
 
 // cleanupLoop deletes expired oauth rows at startup and then hourly.

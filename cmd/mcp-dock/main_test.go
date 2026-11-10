@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -234,5 +235,31 @@ func TestServe(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "gateway.db")); err != nil {
 		t.Errorf("gateway.db: %v", err)
+	}
+}
+
+func TestDataDirTightened(t *testing.T) {
+	p, dataDir := writeConfig(t, ":8080", "")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(context.Background(), []string{"users", "reset", "-config", p, "octo"}, testGetenv, io.Discard); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if fi, err := os.Stat(dataDir); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("data dir: %v %v, want mode 0700", fi, err)
+	}
+}
+
+func TestHTTPServerTimeouts(t *testing.T) {
+	srv := newHTTPServer(http.NotFoundHandler(), slog.New(slog.DiscardHandler))
+	if srv.IdleTimeout != 2*time.Minute || srv.ReadHeaderTimeout != readHeaderTimeout {
+		t.Fatalf("idle %v, read header %v", srv.IdleTimeout, srv.ReadHeaderTimeout)
+	}
+	if srv.WriteTimeout != 0 || srv.ReadTimeout != 0 {
+		t.Fatalf("write %v, read %v: long tool calls need both unset", srv.WriteTimeout, srv.ReadTimeout)
 	}
 }
