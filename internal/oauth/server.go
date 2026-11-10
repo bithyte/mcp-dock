@@ -50,8 +50,7 @@ func New(opts Options) *Server {
 
 // Routes registers every oauth path on mux. Every POST goes through
 // limitBody. The consent POST is /oauth/consent (not /consent) so the
-// mcpdock_auth cookie, scoped to /oauth/, is sent with it. /token is a 501
-// stub until its task lands.
+// mcpdock_auth cookie, scoped to /oauth/, is sent with it.
 func (s *Server) Routes(mux *http.ServeMux) {
 	prm := cors(http.HandlerFunc(s.handleProtectedResource))
 	mux.Handle("GET /.well-known/oauth-protected-resource", prm)
@@ -69,17 +68,15 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /authorize", http.HandlerFunc(s.handleAuthorize))
 	mux.Handle("GET "+callbackPath, http.HandlerFunc(s.handleGitHubCallback))
 	mux.Handle("POST "+consentPath, limitBody(http.HandlerFunc(s.handleConsent)))
-	mux.Handle("POST /token", limitBody(http.HandlerFunc(notImplemented)))
+	tok := cors(limitBody(http.HandlerFunc(s.handleToken)))
+	mux.Handle("POST /token", tok)
+	mux.Handle("OPTIONS /token", tok)
 }
 
 // ResourceMetadataURL is the RFC 9728 metadata URL for the /mcp resource,
 // used in WWW-Authenticate challenges.
 func (s *Server) ResourceMetadataURL() string {
 	return s.cfg.PublicURL + "/.well-known/oauth-protected-resource/mcp"
-}
-
-func notImplemented(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "server_error", "not implemented")
 }
 
 // newSecret returns 32 random bytes, base64url without padding.

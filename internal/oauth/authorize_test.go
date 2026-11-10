@@ -108,7 +108,13 @@ func postForm(t *testing.T, c *http.Client, u string, form url.Values) (*http.Re
 // the callback response.
 func login(t *testing.T, c *http.Client, ts *httptest.Server, fake *testutil.FakeGitHub, clientID, redirect string) (*http.Response, string) {
 	t.Helper()
-	resp, body := get(t, c, authorizeURL(ts, clientID, redirect, nil))
+	return loginAt(t, c, ts, fake, authorizeURL(ts, clientID, redirect, nil))
+}
+
+// loginAt is login starting from a given /authorize URL.
+func loginAt(t *testing.T, c *http.Client, ts *httptest.Server, fake *testutil.FakeGitHub, authURL string) (*http.Response, string) {
+	t.Helper()
+	resp, body := get(t, c, authURL)
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("authorize: status %d: %s", resp.StatusCode, body)
 	}
