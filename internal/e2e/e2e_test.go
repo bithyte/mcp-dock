@@ -28,14 +28,10 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/bithyte/mcp-dock/internal/app"
 	"github.com/bithyte/mcp-dock/internal/config"
-	"github.com/bithyte/mcp-dock/internal/gateway"
-	"github.com/bithyte/mcp-dock/internal/github"
-	"github.com/bithyte/mcp-dock/internal/httpserver"
-	"github.com/bithyte/mcp-dock/internal/oauth"
 	"github.com/bithyte/mcp-dock/internal/store"
 	"github.com/bithyte/mcp-dock/internal/testutil"
-	"github.com/bithyte/mcp-dock/internal/upstream"
 )
 
 func TestMain(m *testing.M) {
@@ -87,6 +83,7 @@ type env struct {
 	cfg  *config.Config
 	fake *testutil.FakeGitHub
 	logs *logBuffer
+	app  *app.App
 }
 
 // newEnv starts the full gateway with the fake upstream as "fake"
@@ -127,48 +124,19 @@ func newEnv(t *testing.T, extra ...config.UpstreamConfig) *env {
 		}
 		return ""
 	}
-	var gw *gateway.Gateway
-	var backends []gateway.Backend
-	var ups []*upstream.Upstream
-	policies := map[string]gateway.ArgPolicy{}
-	for _, uc := range e.cfg.Upstreams {
-		u := upstream.New(upstream.Options{
-			Name:           uc.Name,
-			Command:        uc.Command,
-			Args:           uc.Args,
-			Env:            uc.Environ(getenv),
-			WorkDir:        filepath.Join(e.cfg.DataDir, "upstreams", uc.Name, "cwd"),
-			Logger:         log,
-			OnToolsChanged: func() { gw.Sync() },
-			MinBackoff:     50 * time.Millisecond,
-			MaxBackoff:     200 * time.Millisecond,
-		})
-		ups = append(ups, u)
-		backends = append(backends, u)
-		policies[uc.Name] = gateway.NewArgPolicy(uc.DenyArgs)
-	}
-	gw = gateway.New(gateway.Options{Backends: backends, Policies: policies, Logger: log, Version: "test"})
-	gw.Sync()
-
-	osrv := oauth.New(oauth.Options{
-		Config: e.cfg,
-		Store:  st,
-		GitHub: &github.Client{
-			ClientID:     ghClientID,
-			ClientSecret: ghClientSecret,
-			WebBaseURL:   e.fake.URL,
-			APIBaseURL:   e.fake.URL,
-		},
-		Logger: log,
+	e.app = app.Build(e.cfg, getenv, log, st, app.Options{
+		Version:          "test",
+		GitHubWebBaseURL: e.fake.URL,
+		GitHubAPIBaseURL: e.fake.URL,
+		MinBackoff:       50 * time.Millisecond,
+		MaxBackoff:       200 * time.Millisecond,
 	})
-	e.ts.Config.Handler = httpserver.NewHandler(osrv, gw)
+	e.ts.Config.Handler = e.app.Handler
 	e.ts.Start()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	for _, u := range ups {
-		wg.Go(func() { u.Run(ctx) })
-	}
+	wg.Go(func() { e.app.RunUpstreams(ctx) })
 	t.Cleanup(func() {
 		e.ts.CloseClientConnections()
 		e.ts.Close()
@@ -392,9 +360,32 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("echo: isError=%v %q", res.IsError, resultText(res))
 	}
 
+	// deny_args from the config reach the gateway through app.Build: the
+	// call is refused by the gateway (the fake upstream would accept it)
+	// and the path is gone from the advertised schema.
 	res = call(t, cs, "fake__notify", map[string]any{"text": "x", "attachment": map[string]any{"path": "/etc/passwd"}})
-	if !res.IsError {
-		t.Fatalf("notify with attachment.path: want IsError, got %q", resultText(res))
+	if !res.IsError || !strings.Contains(resultText(res), "not allowed by gateway policy") {
+		t.Fatalf("notify with attachment.path: want policy error, got isError=%v %q", res.IsError, resultText(res))
+	}
+	res = call(t, cs, "fake__notify", map[string]any{"text": "x", "attachment": []any{map[string]any{"path": "/etc/passwd"}}})
+	if !res.IsError || !strings.Contains(resultText(res), "not allowed by gateway policy") {
+		t.Fatalf("notify with attachment[].path: want policy error, got isError=%v %q", res.IsError, resultText(res))
+	}
+	if res := call(t, cs, "fake__notify", map[string]any{"text": "x"}); res.IsError {
+		t.Fatalf("notify without attachment: %q", resultText(res))
+	}
+	lt, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tl := range lt.Tools {
+		if tl.Name != "fake__notify" {
+			continue
+		}
+		b, _ := json.Marshal(tl.InputSchema)
+		if !strings.Contains(string(b), `"attachment"`) || strings.Contains(string(b), `"path"`) {
+			t.Fatalf("fake__notify schema not stripped: %s", b)
+		}
 	}
 
 	// The audit log names the authenticated user, from TokenInfo.
@@ -524,5 +515,57 @@ func TestEndToEndMissingUpstream(t *testing.T) {
 	}
 	if !failed {
 		t.Fatalf("no start failure logged for broken:\n%s", e.logs)
+	}
+}
+
+// An upstream that comes up after clients connected must show up in their
+// tool list. Only OnToolsChanged (wired to gw.Sync in app.Build) makes that
+// happen; nothing else re-syncs the gateway.
+func TestEndToEndLateUpstream(t *testing.T) {
+	gate := filepath.Join(t.TempDir(), "fail")
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := testutil.BuildFakeUpstream(t)
+	e := newEnv(t, config.UpstreamConfig{Name: "late", Command: bin, Env: map[string]string{"FAKE_FAIL_START": gate}})
+
+	changed := make(chan struct{}, 100)
+	c := mcp.NewClient(&mcp.Implementation{Name: "e2e", Version: "1"}, &mcp.ClientOptions{
+		ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {
+			select {
+			case changed <- struct{}{}:
+			default:
+			}
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cs, err := c.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:   e.cfg.ResourceURL(),
+		HTTPClient: &http.Client{Transport: bearer{e.login(t, "cozmin", 1), http.DefaultTransport}},
+		MaxRetries: -1,
+	}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	waitTools(t, cs, "fake__echo")
+	for _, n := range toolNames(t, cs) {
+		if strings.HasPrefix(n, "late__") {
+			t.Fatalf("late upstream tool %q before it started", n)
+		}
+	}
+	for len(changed) > 0 {
+		<-changed
+	}
+	if err := os.Remove(gate); err != nil {
+		t.Fatal(err)
+	}
+	waitTools(t, cs, "late__echo")
+	select {
+	case <-changed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no tools/list_changed after the late upstream came up")
 	}
 }

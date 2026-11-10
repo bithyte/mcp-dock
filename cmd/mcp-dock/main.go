@@ -24,13 +24,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bithyte/mcp-dock/internal/app"
 	"github.com/bithyte/mcp-dock/internal/config"
-	"github.com/bithyte/mcp-dock/internal/gateway"
-	"github.com/bithyte/mcp-dock/internal/github"
-	"github.com/bithyte/mcp-dock/internal/httpserver"
-	"github.com/bithyte/mcp-dock/internal/oauth"
 	"github.com/bithyte/mcp-dock/internal/store"
-	"github.com/bithyte/mcp-dock/internal/upstream"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -154,38 +150,14 @@ func serve(ctx context.Context, cfg *config.Config, getenv func(string) string, 
 		return fmt.Errorf("listen: %w", err)
 	}
 
-	var gw *gateway.Gateway
-	backends := make([]gateway.Backend, 0, len(cfg.Upstreams))
-	ups := make([]*upstream.Upstream, 0, len(cfg.Upstreams))
-	policies := map[string]gateway.ArgPolicy{}
+	a := app.Build(cfg, getenv, log, st, app.Options{Version: version})
 	names := make([]string, 0, len(cfg.Upstreams))
 	for _, uc := range cfg.Upstreams {
-		u := upstream.New(upstream.Options{
-			Name:    uc.Name,
-			Command: uc.Command,
-			Args:    uc.Args,
-			Env:     uc.Environ(getenv),
-			WorkDir: filepath.Join(cfg.DataDir, "upstreams", uc.Name, "cwd"),
-			Logger:  log,
-			// gw is set below, before any upstream runs.
-			OnToolsChanged: func() { gw.Sync() },
-		})
-		ups = append(ups, u)
-		backends = append(backends, u)
-		policies[uc.Name] = gateway.NewArgPolicy(uc.DenyArgs)
 		names = append(names, uc.Name)
 	}
-	gw = gateway.New(gateway.Options{Backends: backends, Policies: policies, Logger: log, Version: version})
-	gw.Sync()
 
-	osrv := oauth.New(oauth.Options{
-		Config: cfg,
-		Store:  st,
-		GitHub: &github.Client{ClientID: cfg.GitHub.ClientID, ClientSecret: cfg.GitHub.ClientSecret},
-		Logger: log,
-	})
 	srv := &http.Server{
-		Handler:           httpserver.NewHandler(osrv, gw),
+		Handler:           a.Handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		// No WriteTimeout: tool calls can block for hours.
 		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn),
@@ -194,9 +166,7 @@ func serve(ctx context.Context, cfg *config.Config, getenv func(string) string, 
 	upCtx, cancelUp := context.WithCancel(context.Background())
 	defer cancelUp()
 	var wg sync.WaitGroup
-	for _, u := range ups {
-		wg.Go(func() { u.Run(upCtx) })
-	}
+	wg.Go(func() { a.RunUpstreams(upCtx) })
 	wg.Go(func() { cleanupLoop(upCtx, st, log) })
 
 	log.Info("mcp-dock listening", "addr", ln.Addr().String(), "public_url", cfg.PublicURL,
