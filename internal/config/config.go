@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -73,6 +74,11 @@ func (c *Config) validate(getenv func(string) string) error {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("public_url must be an http(s) URL, got %q", c.PublicURL)
 	}
+	// The OAuth routes are served at the root and the login cookie is
+	// scoped to /oauth/, so a public_url with a path can't work.
+	if u.Path != "" || u.RawPath != "" || u.Opaque != "" || strings.ContainsAny(c.PublicURL, "?#") {
+		return fmt.Errorf("public_url must be a bare origin like https://host[:port], with no path, query or fragment; got %q", c.PublicURL)
+	}
 	if c.Listen == "" {
 		c.Listen = ":8080"
 	}
@@ -101,6 +107,11 @@ func (c *Config) validate(getenv func(string) string) error {
 		seen[up.Name] = true
 		if up.Command == "" {
 			return fmt.Errorf("%s.command is required", p)
+		}
+		// Upstreams run in an empty working dir, so a relative path like
+		// ./bin/x would resolve against that dir and never be found.
+		if strings.Contains(up.Command, "/") && !filepath.IsAbs(up.Command) {
+			return fmt.Errorf("%s.command %q must be absolute or on PATH (a bare name); relative paths don't work because upstreams run in an empty working dir", p, up.Command)
 		}
 		for _, v := range up.EnvFrom {
 			if getenv(v) == "" {

@@ -70,6 +70,12 @@ func TestLoadRejects(t *testing.T) {
 	}{
 		{"missing public_url", r("public_url: https://mcp.cozminu.com/\n", "").Replace(validYAML), "public_url", goodEnv},
 		{"public_url scheme", r("https://mcp.cozminu.com/", "ftp://x").Replace(validYAML), "public_url", goodEnv},
+		{"public_url path", r("https://mcp.cozminu.com/", "https://mcp.cozminu.com/dock").Replace(validYAML), "public_url", goodEnv},
+		{"public_url path trailing slash", r("https://mcp.cozminu.com/", "https://mcp.cozminu.com/dock/").Replace(validYAML), "public_url", goodEnv},
+		{"public_url query", r("https://mcp.cozminu.com/", "https://mcp.cozminu.com/?a=1").Replace(validYAML), "public_url", goodEnv},
+		{"public_url empty query", r("https://mcp.cozminu.com/", "https://mcp.cozminu.com?").Replace(validYAML), "public_url", goodEnv},
+		{"public_url fragment", r("https://mcp.cozminu.com/", "\"https://mcp.cozminu.com#x\"").Replace(validYAML), "public_url", goodEnv},
+		{"public_url empty fragment", r("https://mcp.cozminu.com/", "\"https://mcp.cozminu.com/#\"").Replace(validYAML), "public_url", goodEnv},
 		{"missing data_dir", r("data_dir: /var/lib/mcp-dock\n", "").Replace(validYAML), "data_dir", goodEnv},
 		{"missing client_id", r("client_id: Iv1.xxxxx", "client_id: \"\"").Replace(validYAML), "client_id", goodEnv},
 		{"secret env empty", validYAML, "client_secret_env", map[string]string{"JAYPOST_TOKEN": "t"}},
@@ -79,6 +85,9 @@ func TestLoadRejects(t *testing.T) {
 		{"name trailing dash", r("name: jaypost", "name: a-").Replace(validYAML), "name", goodEnv},
 		{"duplicate names", validYAML + "  - name: jaypost\n    command: x\n", "duplicate", goodEnv},
 		{"empty command", r("command: jaypost", "command: \"\"").Replace(validYAML), "command", goodEnv},
+		{"relative command dot", r("command: jaypost", "command: ./bin/jaypost").Replace(validYAML), "absolute or on PATH", goodEnv},
+		{"relative command dir", r("command: jaypost", "command: bin/jaypost").Replace(validYAML), "absolute or on PATH", goodEnv},
+		{"relative command parent", r("command: jaypost", "command: ../jaypost").Replace(validYAML), "absolute or on PATH", goodEnv},
 		{"env_from unset", validYAML, "JAYPOST_TOKEN", map[string]string{"GITHUB_CLIENT_SECRET": "s"}},
 		{"deny_args empty", r("[attachment.path]", "[\"\"]").Replace(validYAML), "deny_args", goodEnv},
 		{"deny_args dotdot", r("[attachment.path]", "[a..b]").Replace(validYAML), "deny_args", goodEnv},
@@ -149,5 +158,22 @@ func TestDenyArgsAccepted(t *testing.T) {
 	}
 	if got := c.Upstreams[0].DenyArgs; len(got) != 3 {
 		t.Fatalf("deny_args = %q", got)
+	}
+}
+
+func TestAccepts(t *testing.T) {
+	r := strings.NewReplacer
+	for _, tc := range []struct{ name, yaml string }{
+		{"public_url root slash", validYAML},
+		{"public_url no slash", r("https://mcp.cozminu.com/", "https://mcp.cozminu.com").Replace(validYAML)},
+		{"public_url port", r("https://mcp.cozminu.com/", "http://127.0.0.1:8080/").Replace(validYAML)},
+		{"command bare", validYAML},
+		{"command absolute", r("command: jaypost", "command: /usr/local/bin/jaypost").Replace(validYAML)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Load(write(t, tc.yaml), env(goodEnv)); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
