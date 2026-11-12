@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Build image (amd64 only; arm64 is checked at publish)
+        run: docker buildx build --load -f Containerfile --build-arg VERSION=0.0.0-ci -t mcp-dock:ci .
+      - name: Test image
+        env:
+          CT: docker
+          EXPECT_VERSION: 0.0.0-ci
+        run: scripts/test-image.sh mcp-dock:ci

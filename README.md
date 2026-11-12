@@ -10,10 +10,98 @@ The gateway speaks plain HTTP. Put a TLS-terminating reverse proxy in front.
 
 Optional version stamp: `go build -ldflags "-X main.version=1.0.0" ./cmd/mcp-dock`.
 
+## Container image
+
+Images are published to `ghcr.io/bithyte/mcp-dock` with tags `X.Y.Z`, `X.Y` and `latest`, for linux/amd64 and linux/arm64. Pin an exact version in production, and the digest too if you can (`ghcr.io/bithyte/mcp-dock:0.1.0@sha256:<digest>`; the digest is in each release's notes).
+
+mcp-dock speaks plain HTTP. Any internet-facing deployment needs a TLS-terminating reverse proxy in front of it. The proxy must preserve the Host header, must not buffer responses (the MCP endpoint streams over SSE), and needs long read timeouts, since `ask_user` can wait a long time. Publish the container port on `127.0.0.1` only, so the proxy is the only way in. A minimal Caddy example (Caddy passes the Host header through by default):
+
+    mcp.example.com {
+        reverse_proxy 127.0.0.1:8080 {
+            flush_interval -1
+            transport http {
+                read_timeout 1h
+            }
+        }
+    }
+
+### Running it
+
+The image runs as uid 65532, so the data dir has to be writable by that uid. For docker or rootful podman:
+
+    mkdir -p data && sudo chown 65532:65532 data
+
+For rootless podman, add `--userns=keep-id:uid=65532,gid=65532` to the run command instead, so your host user owns the files. A named volume also works and needs no chown (the image ships `/data` owned by 65532): use `-v mcp-dock-data:/data` in place of `-v ./data:/data`.
+
+    podman run -d --name mcp-dock \
+      --read-only --cap-drop=ALL --security-opt no-new-privileges \
+      --user 65532:65532 --tmpfs /tmp \
+      -p 127.0.0.1:8080:8080 \
+      --env-file ./mcp-dock.env \
+      -v ./data:/data \
+      -v ./config.yaml:/etc/mcp-dock/config.yaml:ro \
+      ghcr.io/bithyte/mcp-dock:0.1.0
+
+`mcp-dock.env` holds the secrets (`GITHUB_CLIENT_SECRET=...`, `OP_PRIVATE_KEY=...` in its base64 form since env files are one line per var, whatever your upstreams' `env_from` names). Set `data_dir: /data` in the config. The image's default command is `serve` and `MCP_DOCK_CONFIG` is `/etc/mcp-dock/config.yaml`. Running it with no config doesn't print usage; to check the binary, use `docker run --rm --entrypoint mcp-dock ghcr.io/bithyte/mcp-dock:0.1.0 version`. The same commands work with `docker` in place of `podman`.
+
+### Upstreams
+
+The image has node 24, npm, python 3.13, uv and libatomic. Pin every upstream to an exact version.
+
+npx (`--prefer-offline` keeps registry revalidation to a minimum on restarts):
+
+    - name: everything
+      command: npx
+      args: ["--prefer-offline", "-y", "@modelcontextprotocol/server-everything@2.3.0", "stdio"]
+
+uvx:
+
+    - name: time
+      command: uvx
+      args: ["mcp-server-time==2026.11.11"]
+
+A mounted binary, added to the run command with `-v /path/to/bin/jaypost:/usr/local/bin/jaypost:ro`:
+
+    - name: jaypost
+      command: jaypost
+      args: ["mcp"]
+
+The base is Debian (glibc), and libatomic is installed, so dynamically linked glibc binaries work. Musl-only binaries don't.
+
+### Package cache
+
+The image sets `HOME=/data/home`, and the gateway passes `HOME` to every upstream, so npm's cache and uv's cache and tool dirs land on the data volume. npm and uv create `/data/home` themselves on first start. Packages are downloaded once and survive restarts and image upgrades. All upstreams share this HOME; override it for one with `env: {HOME: /data/home-foo}`.
+
+Don't set `HOME=/tmp` on the container. `/tmp` is a tmpfs, so every restart would re-download everything.
+
+Only the top-level package is pinned. Its transitive dependencies aren't lockfile-pinned, so they're whatever resolved on first install; the cache freezes them from then on. Delete `data/home` to force a fresh resolve.
+
+uvx uses the image's python 3.13 and never downloads one (`/etc/uv/uv.toml` sets `python-downloads = "never"`). A package that needs a different python fails with an error rather than fetching one.
+
+### Adding your own packages
+
+If you don't want installs at startup, build on the image and install at build time. The global npm prefix is `/usr/local`, so the installed bin is on `PATH` and `command:` is its bin name.
+
+    FROM ghcr.io/bithyte/mcp-dock:0.1.0
+    USER 0
+    RUN HOME=/root npm install -g some-mcp-server@1.2.3
+    USER 65532:65532
+
+## Release binaries
+
+Each GitHub release has `mcp-dock-linux-x64.gz`, `mcp-dock-linux-arm64.gz` and `SHA256SUMS`, for running without a container.
+
+    sha256sum -c SHA256SUMS --ignore-missing
+    gunzip mcp-dock-linux-x64.gz
+    chmod +x mcp-dock-linux-x64
+
+Run the check after downloading, before the `gunzip`.
+
 ## Usage
 
     mcp-dock serve [-config path]
     mcp-dock users reset [-config path] <login | wallet address>
+    mcp-dock version
 
 The config path defaults to `$MCP_DOCK_CONFIG`, else `./config.yaml`. Logs are JSON on stdout. `/healthz` returns `ok` without auth.
 
