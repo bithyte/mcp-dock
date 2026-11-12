@@ -46,8 +46,6 @@ func testGetenv(k string) string {
 	switch k {
 	case "GH_SECRET":
 		return "s3cret-value"
-	case "PATH":
-		return os.Getenv("PATH")
 	}
 	return ""
 }
@@ -208,17 +206,17 @@ func freeAddr(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// TestServe runs the real serve path with one working and one missing
+// TestServe runs the real serve path with one working and one unreachable
 // upstream, checks it serves, and checks it shuts down on ctx cancel.
 func TestServe(t *testing.T) {
-	bin := testutil.BuildFakeUpstream(t)
+	runnerURL, _ := testutil.StartRunner(t, testutil.RunnerOptions{})
 	addr := freeAddr(t)
 	p, dataDir := writeConfig(t, addr, fmt.Sprintf(`upstreams:
   - name: fake
-    command: %s
+    url: %s
   - name: broken
-    command: /nonexistent
-`, bin))
+    url: http://%s/mcp
+`, runnerURL, freeAddr(t)))
 
 	out := &syncBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())

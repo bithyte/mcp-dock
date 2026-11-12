@@ -131,7 +131,7 @@ See `config.example.yaml`. Unknown fields are rejected. A bad config fails start
 
 - `public_url`: external https URL of the gateway, origin only (`https://host[:port]`, no path, query or fragment; the OAuth routes live at the root). Required. Used for OAuth metadata and callbacks; never taken from request headers. The MCP endpoint is `<public_url>/mcp`.
 - `listen`: listen address. Default `:8080`.
-- `data_dir`: required. Holds `gateway.db` (SQLite) and `upstreams/<name>/cwd` (empty working dir for each upstream).
+- `data_dir`: required. Holds `gateway.db` (SQLite).
 - `providers`: login providers. Configure at least one. The old top-level `github:` block and flat `allowed_users` list are rejected at startup, with a message saying where they moved.
   - `providers.github.client_id`: GitHub OAuth App client ID.
   - `providers.github.client_secret_env`: name of the env var holding the client secret.
@@ -141,24 +141,22 @@ See `config.example.yaml`. Unknown fields are rejected. A bad config fails start
 - `allowed_users`: per-provider allowlists. A list for a provider that isn't configured is a startup error. Checked at login, at token issue and refresh, and on every MCP request. There's no config hot reload, so removing an entry takes effect after a restart; the restart also drops that user's open sessions.
   - `allowed_users.github`: GitHub logins, case-insensitive.
   - `allowed_users.open_payments`: wallet addresses. `$host/path` and `https://host/path` are the same entry; both are normalized to `https://host/path` at load. Only `https` is accepted, with no query, fragment or credentials. Scheme and host are case-insensitive (lowercased); the path is case-sensitive and kept as written. A trailing slash is ignored, and a bare `$host` means `https://host/.well-known/pay`.
-- `upstreams`: list of stdio servers.
+- `upstreams`: list of streamable HTTP MCP servers, usually mcp-runner containers in front of stdio servers.
   - `name`: lowercase letters, digits, single `_` or `-`; no `__`; unique.
-  - `command`, `args`: how to launch it. `command` must be an absolute path or a bare name found on `PATH`. Relative paths like `./bin/x` are rejected, because the upstream runs in an empty working dir.
-  - `env`: literal env vars for the upstream (non-secret).
-  - `env_from`: names of gateway env vars to pass through (secrets). Each must be set at startup.
+  - `url`: the server's MCP endpoint, e.g. `http://jaypost:8080/mcp`. Absolute `http` or `https` with a host; a path is fine, but no query, fragment or `user:pass@`, so credentials don't end up in the config file or in logged URLs. Kept as written. `http` is allowed since runners usually sit on an internal network.
+  - `bearer_token_env`: optional. Name of the env var holding the bearer token sent as `Authorization: Bearer` on every request to this upstream. If set, the var must be non-empty at startup.
   - `deny_args`: dotted argument paths rejected before the call reaches the upstream (e.g. `attachment.path`). Each segment is an exact property name (no wildcards), matched case-insensitively. Arrays along the path are looked through, so `attachment.path` also blocks `{"attachment": [{"path": ...}]}`. Denied paths are also removed from the tool schemas clients see. A path that matches no parameter of any of the upstream's tools is logged as a warning, since it's probably a typo.
+  - `command`, `args`, `env` and `env_from` (the old stdio fields) are rejected at startup with a message saying stdio upstreams moved to mcp-runner.
 
 Users are separate per provider. GitHub login `alice` is user `github:alice`; wallet `$example.com/alice` is user `open_payments:https://example.com/alice`. The same person signing in both ways is two users, each needing their own allowlist entry and having their own consent and tokens. There is no account linking. Existing GitHub users are migrated to `github:<login>` ids at startup, so their sessions and GitHub ID pins carry over.
 
 Wallet login checks, in order: the typed address must be on the allowlist before the gateway makes any request to it (so it never fetches a URL a stranger typed); the `id` in the wallet's own document must be on the allowlist too, and have the same scheme, host and port as what was typed; and the address is checked once more after the wallet provider finalizes the grant.
 
-Upstream processes get only `PATH`, `HOME`, their `env`, and their `env_from` vars, not the gateway's environment.
-
 ## Environment variables
 
 - `GITHUB_CLIENT_SECRET` (or whatever `providers.github.client_secret_env` names): GitHub OAuth App secret.
 - `OP_PRIVATE_KEY` (or whatever `providers.open_payments.private_key_env` names): the gateway's Ed25519 private key, PEM text or base64 of the PEM.
-- `JAYPOST_TOKEN` (when using the jaypost upstream from the example config): jaypost API key.
+- `JAYPOST_RUNNER_TOKEN` (or whatever an upstream's `bearer_token_env` names): bearer token for that upstream's runner.
 - `MCP_DOCK_CONFIG`: default config path.
 
 Both `serve` and `users reset` load and validate the full config, so `users reset` needs the same env vars set as `serve`.

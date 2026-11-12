@@ -8,7 +8,6 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -44,11 +43,9 @@ type App struct {
 	Upstreams []*upstream.Upstream
 }
 
-// Build wires everything from cfg. Upstream processes get only the env
-// Environ builds from getenv, and an empty working dir under cfg.DataDir.
-// Nothing runs until RunUpstreams. It fails if the Open Payments client
-// can't be built from the config.
-func Build(cfg *config.Config, getenv func(string) string, log *slog.Logger, st *store.Store, opts Options) (*App, error) {
+// Build wires everything from cfg. Nothing runs until RunUpstreams. It
+// fails if the Open Payments client can't be built from the config.
+func Build(cfg *config.Config, log *slog.Logger, st *store.Store, opts Options) (*App, error) {
 	var op *oplogin.Client
 	if c := cfg.Providers.OpenPayments; c != nil {
 		var err error
@@ -70,12 +67,11 @@ func Build(cfg *config.Config, getenv func(string) string, log *slog.Logger, st 
 	policies := map[string]gateway.ArgPolicy{}
 	for _, uc := range cfg.Upstreams {
 		u := upstream.New(upstream.Options{
-			Name:    uc.Name,
-			Command: uc.Command,
-			Args:    uc.Args,
-			Env:     uc.Environ(getenv),
-			WorkDir: filepath.Join(cfg.DataDir, "upstreams", uc.Name, "cwd"),
-			Logger:  log,
+			Name:        uc.Name,
+			URL:         uc.URL,
+			BearerToken: uc.BearerToken,
+			Version:     opts.Version,
+			Logger:      log,
 			// gw is set below, before any upstream runs.
 			OnToolsChanged: func() { gw.Sync() },
 			MinBackoff:     opts.MinBackoff,

@@ -1,5 +1,5 @@
-// Command mcp-dock is an OAuth-protected MCP gateway in front of local
-// stdio MCP servers.
+// Command mcp-dock is an OAuth-protected MCP gateway in front of streamable
+// HTTP MCP servers (usually mcp-runner containers).
 //
 //	mcp-dock serve [-config path]
 //	mcp-dock users reset [-config path] <login | wallet address>
@@ -81,7 +81,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout 
 		if err != nil {
 			return err
 		}
-		return serve(ctx, cfg, getenv, stdout)
+		return serve(ctx, cfg, stdout)
 	case "version":
 		if len(args) > 1 {
 			return usageError("version takes no arguments")
@@ -158,7 +158,7 @@ func resetUser(ctx context.Context, cfg *config.Config, arg string, stdout io.Wr
 	return nil
 }
 
-func serve(ctx context.Context, cfg *config.Config, getenv func(string) string, stdout io.Writer) error {
+func serve(ctx context.Context, cfg *config.Config, stdout io.Writer) error {
 	log := slog.New(slog.NewJSONHandler(stdout, nil))
 
 	st, err := openStore(cfg)
@@ -167,7 +167,7 @@ func serve(ctx context.Context, cfg *config.Config, getenv func(string) string, 
 	}
 	defer st.Close()
 
-	a, err := app.Build(cfg, getenv, log, st, app.Options{Version: version})
+	a, err := app.Build(cfg, log, st, app.Options{Version: version})
 	if err != nil {
 		return err
 	}

@@ -1,7 +1,7 @@
-// Package upstream supervises one stdio MCP server process: it starts it,
-// caches its tool list, forwards calls, and restarts it with backoff when it
-// exits or fails to start. A broken upstream never stops Run; it just stays
-// down and is retried.
+// Package upstream supervises one streamable HTTP MCP upstream (usually an
+// mcp-runner): it connects, caches the tool list, forwards calls, and
+// reconnects with backoff when the session is lost or the connect fails. A
+// broken upstream never stops Run; it just stays down and is retried.
 package upstream
 
 import (
@@ -11,15 +11,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
-	"os/exec"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/bithyte/mcp-dock/internal/linelog"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -30,49 +29,78 @@ var ErrUnavailable = errors.New("upstream unavailable")
 const (
 	defaultMinBackoff = time.Second
 	defaultMaxBackoff = 60 * time.Second
-	// stableUptime is how long a process must stay up before the backoff
+	// stableUptime is how long a session must stay up before the backoff
 	// resets to MinBackoff.
 	stableUptime = 60 * time.Second
 
 	connectTimeout   = 30 * time.Second
 	listToolsTimeout = 30 * time.Second
-	// terminateDuration is how long Close waits after closing stdin before
-	// SIGTERM, and again before SIGKILL.
-	terminateDuration = 2 * time.Second
-	// closeGrace is how long a graceful session close may take on shutdown
-	// before the process is killed. The SDK's Close waits for in-flight
-	// calls, so without this a call whose ctx never ends blocks Run.
+	// closeGrace is how long a graceful session close (the DELETE to the
+	// upstream) may take before Run gives up on it.
 	closeGrace = 2 * time.Second
-	// waitDelay bounds how long we wait for the stderr pipe to drain after
-	// the process exits (e.g. a grandchild still holds it open).
-	waitDelay = 2 * time.Second
 )
 
 type Options struct {
-	Name           string
-	Command        string
-	Args           []string
-	Env            []string // from UpstreamConfig.Environ; the process gets only this
-	WorkDir        string   // created if missing
+	Name string
+	URL  string // streamable HTTP endpoint, e.g. http://jaypost:8080/mcp
+	// BearerToken, if non-empty, is sent as Authorization: Bearer on every
+	// request.
+	BearerToken string
+	// HTTPClient is the base client. Nil means a client with no overall
+	// timeout, since tool calls can run for a long time.
+	HTTPClient     *http.Client
+	Version        string // client implementation version sent on initialize
 	Logger         *slog.Logger
 	OnToolsChanged func() // called after tool cache changes (up, down, list_changed)
 	MinBackoff     time.Duration
 	MaxBackoff     time.Duration
 }
 
-// Upstream is safe for concurrent use. Calls are not serialized: the SDK
-// session multiplexes concurrent requests over the one stdio connection.
+// Upstream is safe for concurrent use. Calls are not serialized: each one is
+// its own HTTP request on the shared session.
 type Upstream struct {
 	opts Options
 	log  *slog.Logger
+	http *http.Client // opts.HTTPClient wrapped with the header transport
 
 	mu      sync.RWMutex
 	session *mcp.ClientSession // nil while down
 	dead    chan struct{}      // closed when session's connection ends
+	live    context.Context    // canceled when the session is torn down
 	tools   []*mcp.Tool        // nil while down
 
 	progress sync.Map // progress token (string) -> func(*mcp.ProgressNotificationParams)
 	tokenSeq atomic.Uint64
+}
+
+// headerTransport adds the upstream's auth header to every request.
+type headerTransport struct {
+	base   http.RoundTripper
+	bearer string
+}
+
+func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.bearer != "" {
+		// A RoundTripper must not modify the caller's request.
+		req = req.Clone(req.Context())
+		req.Header.Set("Authorization", "Bearer "+t.bearer)
+	}
+	return t.base.RoundTrip(req)
+}
+
+// wrapClient returns a copy of base (or a default client) whose transport
+// adds the upstream's headers.
+func wrapClient(base *http.Client, bearer string) *http.Client {
+	c := &http.Client{}
+	if base != nil {
+		*c = *base
+	}
+	rt := c.Transport
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	c.Transport = &headerTransport{base: rt, bearer: bearer}
+	return c
 }
 
 func New(opts Options) *Upstream {
@@ -89,7 +117,14 @@ func New(opts Options) *Upstream {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Upstream{opts: opts, log: log.With("upstream", opts.Name)}
+	if opts.Version == "" {
+		opts.Version = "dev"
+	}
+	return &Upstream{
+		opts: opts,
+		log:  log.With("upstream", opts.Name),
+		http: wrapClient(opts.HTTPClient, opts.BearerToken),
+	}
 }
 
 func (u *Upstream) Name() string { return u.opts.Name }
@@ -110,11 +145,16 @@ func (u *Upstream) Tools() []*mcp.Tool {
 func (u *Upstream) Call(ctx context.Context, tool string, args json.RawMessage,
 	onProgress func(*mcp.ProgressNotificationParams)) (*mcp.CallToolResult, error) {
 	u.mu.RLock()
-	s, dead := u.session, u.dead
+	s, dead, live := u.session, u.dead, u.live
 	u.mu.RUnlock()
 	if s == nil {
 		return nil, ErrUnavailable
 	}
+	// End the request when the session is torn down, so shutdown doesn't
+	// wait on a call whose ctx never ends.
+	cctx, stop := context.WithCancel(ctx)
+	defer stop()
+	defer context.AfterFunc(live, stop)()
 	params := &mcp.CallToolParams{Name: tool}
 	if len(args) > 0 {
 		params.Arguments = args
@@ -125,12 +165,12 @@ func (u *Upstream) Call(ctx context.Context, tool string, args json.RawMessage,
 		u.progress.Store(token, onProgress)
 		defer u.progress.Delete(token)
 	}
-	res, err := s.CallTool(ctx, params)
+	res, err := s.CallTool(cctx, params)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
-		if sessionLost(err, dead) {
+		if live.Err() != nil || sessionLost(err, dead) {
 			return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 		}
 		return nil, err
@@ -138,13 +178,15 @@ func (u *Upstream) Call(ctx context.Context, tool string, args json.RawMessage,
 	return res, nil
 }
 
-// sessionLost reports whether a failed call failed because the connection to
-// the upstream went away (process died, pipe broke, session closed), as
-// opposed to the upstream answering with an error. When the process dies
-// mid-call the SDK retires the call with the read error (io.EOF), not
-// mcp.ErrConnectionClosed, so check transport errors and the session's
-// liveness too.
+// sessionLost reports whether a failed call failed because the session with
+// the upstream went away (404 for the session id, connection closed), as
+// opposed to the upstream answering with an error. Once the client conn has
+// failed, the SDK retires calls with that failure, which may be any of these
+// or a plain transport error, so check the session's liveness too.
 func sessionLost(err error, dead <-chan struct{}) bool {
+	if errors.Is(err, mcp.ErrSessionMissing) {
+		return true
+	}
 	var wire *jsonrpc.Error
 	if errors.As(err, &wire) {
 		return false // a real response from the upstream
@@ -192,8 +234,8 @@ func (u *Upstream) Run(ctx context.Context) {
 	}
 }
 
-// nextBackoff returns how long to wait before the next start and the backoff
-// to use after that. A process that stayed up for stableUptime resets the
+// nextBackoff returns how long to wait before the next connect and the
+// backoff to use after that. A session that stayed up for stableUptime resets the
 // backoff to lo.
 func nextBackoff(cur, uptime, lo, hi time.Duration) (wait, next time.Duration) {
 	if uptime >= stableUptime {
@@ -202,26 +244,11 @@ func nextBackoff(cur, uptime, lo, hi time.Duration) (wait, next time.Duration) {
 	return cur, min(cur*2, hi)
 }
 
-// runOnce starts the process, serves it until it exits or ctx is done, and
+// runOnce connects, serves the session until it ends or ctx is done, and
 // reports how long it was up (0 if it never connected).
 func (u *Upstream) runOnce(ctx context.Context) (time.Duration, error) {
-	if u.opts.WorkDir != "" {
-		if err := os.MkdirAll(u.opts.WorkDir, 0o700); err != nil {
-			return 0, fmt.Errorf("create workdir: %w", err)
-		}
-	}
-	stderr := linelog.New(u.log)
-	defer stderr.Flush()
-
-	cmd := exec.Command(u.opts.Command, u.opts.Args...)
-	// Never nil: a nil Env would inherit the gateway's environment.
-	cmd.Env = append([]string{}, u.opts.Env...)
-	cmd.Dir = u.opts.WorkDir
-	cmd.Stderr = stderr
-	cmd.WaitDelay = waitDelay
-
 	refresh := make(chan struct{}, 1)
-	client := mcp.NewClient(&mcp.Implementation{Name: "mcp-dock", Version: "0.1.0"}, &mcp.ClientOptions{
+	client := mcp.NewClient(&mcp.Implementation{Name: "mcp-dock", Version: u.opts.Version}, &mcp.ClientOptions{
 		Logger: u.log,
 		ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {
 			// Notifications run on the receive loop; refetch elsewhere.
@@ -233,24 +260,22 @@ func (u *Upstream) runOnce(ctx context.Context) (time.Duration, error) {
 		ProgressNotificationHandler: u.handleProgress,
 	})
 
+	transport := &mcp.StreamableClientTransport{Endpoint: u.opts.URL, HTTPClient: u.http}
 	cctx, cancel := context.WithTimeout(ctx, connectTimeout)
-	session, err := client.Connect(cctx, &mcp.CommandTransport{Command: cmd, TerminateDuration: terminateDuration}, nil)
+	session, err := client.Connect(cctx, transport, nil)
 	cancel()
 	if err != nil {
-		if cmd.Process != nil {
-			// Connect normally closes the session (and reaps the process) on
-			// failure; kill anyway so a hung child can't linger.
-			_ = cmd.Process.Kill()
-		}
 		return 0, err
 	}
 	started := time.Now()
 
 	tools, err := u.fetchTools(ctx, session)
 	if err != nil {
-		_ = session.Close()
+		u.closeSession(session)
 		return time.Since(started), fmt.Errorf("list tools: %w", err)
 	}
+	// The session ends (Wait returns) when the client conn fails: a 404 for
+	// the session id, or the standalone GET stream failing to reconnect.
 	dead := make(chan struct{})
 	exited := make(chan error, 1)
 	go func() {
@@ -258,8 +283,9 @@ func (u *Upstream) runOnce(ctx context.Context) (time.Duration, error) {
 		close(dead)
 		exited <- err
 	}()
+	live, kill := context.WithCancel(context.Background())
 	u.mu.Lock()
-	u.session, u.tools, u.dead = session, tools, dead
+	u.session, u.tools, u.dead, u.live = session, tools, dead, live
 	u.mu.Unlock()
 	u.log.Info("upstream started", "tools", len(tools))
 	u.notify()
@@ -279,21 +305,24 @@ func (u *Upstream) runOnce(ctx context.Context) (time.Duration, error) {
 	uptime := time.Since(started)
 	rcancel()
 
-	// Mark down before closing so new calls fail fast with ErrUnavailable.
+	// Mark down before closing so new calls fail fast with ErrUnavailable,
+	// then end in-flight calls so Close doesn't wait on them.
 	u.mu.Lock()
-	u.session, u.tools, u.dead = nil, nil, nil
+	u.session, u.tools, u.dead, u.live = nil, nil, nil, nil
 	u.mu.Unlock()
+	kill()
 	u.notify()
 
-	u.closeSession(session, cmd)
+	u.closeSession(session)
 	<-refreshDone
 	return uptime, err
 }
 
-// closeSession closes the session (stdin, then SIGTERM/SIGKILL, reaping the
-// process). If in-flight calls keep it open past closeGrace, the process is
-// killed, which fails those calls and lets Close finish.
-func (u *Upstream) closeSession(s *mcp.ClientSession, cmd *exec.Cmd) {
+// closeSession closes the session, which DELETEs it on the upstream. If that
+// takes longer than closeGrace (an upstream that accepts the connection but
+// never answers), give up; the SDK bounds the DELETE itself and cancels its
+// remaining requests when it returns.
+func (u *Upstream) closeSession(s *mcp.ClientSession) {
 	closed := make(chan struct{})
 	go func() {
 		defer close(closed)
@@ -301,12 +330,9 @@ func (u *Upstream) closeSession(s *mcp.ClientSession, cmd *exec.Cmd) {
 	}()
 	select {
 	case <-closed:
-		return
 	case <-time.After(closeGrace):
+		u.log.Warn("upstream close timed out")
 	}
-	u.log.Warn("upstream close timed out; killing")
-	_ = cmd.Process.Kill()
-	<-closed
 }
 
 func (u *Upstream) refreshLoop(ctx context.Context, s *mcp.ClientSession, refresh <-chan struct{}) {
