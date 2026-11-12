@@ -31,7 +31,7 @@ The image runs as uid 65532, so the data dir has to be writable by that uid. For
 
     mkdir -p data && sudo chown 65532:65532 data
 
-For rootless podman, add `--userns=keep-id:uid=65532,gid=65532` to the run command instead, so your host user owns the files.
+For rootless podman, add `--userns=keep-id:uid=65532,gid=65532` to the run command instead, so your host user owns the files. A named volume also works and needs no chown (the image ships `/data` owned by 65532): use `-v mcp-dock-data:/data` in place of `-v ./data:/data`.
 
     podman run -d --name mcp-dock \
       --read-only --cap-drop=ALL --security-opt no-new-privileges \
@@ -84,7 +84,7 @@ If you don't want installs at startup, build on the image and install at build t
 
     FROM ghcr.io/bithyte/mcp-dock:0.1.0
     USER 0
-    RUN npm install -g some-mcp-server@1.2.3
+    RUN HOME=/root npm install -g some-mcp-server@1.2.3
     USER 65532:65532
 
 ## Release binaries
