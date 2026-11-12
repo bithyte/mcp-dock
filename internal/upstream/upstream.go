@@ -317,15 +317,22 @@ func (u *Upstream) callOn(ctx context.Context, c conn, params *mcp.CallToolParam
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, false, ctxErr
 	}
-	// ErrSessionMissing alone isn't enough: when any request gets the 404,
-	// the SDK fails the conn, and jsonrpc2 may retire calls still in flight
-	// with that same error even though they were sent. So also require that
-	// this call's own POST got the 404 (or never went out at all).
-	retry := errors.Is(err, mcp.ErrSessionMissing) && !a.reached.Load()
+	retry := retryable(err, a.reached.Load(), ctx.Err())
 	if c.live.Err() != nil || sessionLost(err, c.dead) {
 		return nil, retry, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	return nil, retry, err
+}
+
+// retryable reports whether a failed attempt may be retried on another
+// session: err is its error, reached whether its POST may have reached the
+// upstream, and ctxErr the call's ctx error. ErrSessionMissing alone isn't
+// enough: when any request gets the 404, the SDK fails the conn, and
+// jsonrpc2 retires calls still in flight with that same error even though
+// they were sent. So also require that this call's own POST got the 404 (or
+// never went out at all).
+func retryable(err error, reached bool, ctxErr error) bool {
+	return ctxErr == nil && !reached && errors.Is(err, mcp.ErrSessionMissing)
 }
 
 // awaitSession waits for an up session other than old, bounded by

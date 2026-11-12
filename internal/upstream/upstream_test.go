@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -656,7 +657,8 @@ func TestNoRetryAfterSend(t *testing.T) {
 // sent, so it must not be retried. jsonrpc2 may retire such a call with the
 // conn's session-missing error; with go-sdk v1.8.0 it's instead ended by the
 // teardown (context canceled), so this passes even without Call's
-// reached check. It's here so a change in either doesn't go unnoticed.
+// reached check; TestRetryable and TestTransportMarksReached pin that check.
+// It's here so a change in either doesn't go unnoticed.
 func TestNoRetryInFlightOnSessionMissing(t *testing.T) {
 	x := newExpirer()
 	log := filepath.Join(t.TempDir(), "calls")
@@ -933,6 +935,88 @@ func TestRedirectNotFollowed(t *testing.T) {
 			}
 			if n := hits.Load(); n != 0 {
 				t.Fatalf("redirect target contacted %d times (headers %v)", n, leaked.Load())
+			}
+		})
+	}
+}
+
+// retryable is the only thing that stops a call that was sent from being
+// sent again: jsonrpc2 retires in-flight calls with the conn's
+// ErrSessionMissing once any request gets the 404.
+func TestRetryable(t *testing.T) {
+	wrapped := fmt.Errorf("calling tools/call: %w", mcp.ErrSessionMissing)
+	for _, tc := range []struct {
+		name    string
+		err     error
+		reached bool
+		ctxErr  error
+		want    bool
+	}{
+		{"session missing, not reached", mcp.ErrSessionMissing, false, nil, true},
+		{"wrapped session missing, not reached", wrapped, false, nil, true},
+		{"session missing, reached", mcp.ErrSessionMissing, true, nil, false},
+		{"wrapped session missing, reached", wrapped, true, nil, false},
+		{"other error, not reached", errors.New("boom"), false, nil, false},
+		{"connection closed, not reached", mcp.ErrConnectionClosed, false, nil, false},
+		{"rpc error, not reached", &jsonrpc.Error{Code: -32000, Message: "x"}, false, nil, false},
+		{"session missing, ctx canceled", mcp.ErrSessionMissing, false, context.Canceled, false},
+		{"session missing, ctx deadline", wrapped, false, context.DeadlineExceeded, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retryable(tc.err, tc.reached, tc.ctxErr); got != tc.want {
+				t.Fatalf("retryable(%v, %v, %v) = %v, want %v", tc.err, tc.reached, tc.ctxErr, got, tc.want)
+			}
+		})
+	}
+}
+
+type stubRT struct {
+	status int
+	err    error
+}
+
+func (s stubRT) RoundTrip(*http.Request) (*http.Response, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &http.Response{StatusCode: s.status, Body: http.NoBody, Header: http.Header{}}, nil
+}
+
+// headerTransport marks an attempt reached unless its POST got a 404 for
+// the session id.
+func TestTransportMarksReached(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		method  string
+		rt      stubRT
+		attempt bool
+		want    bool
+	}{
+		{"POST 200", http.MethodPost, stubRT{status: http.StatusOK}, true, true},
+		{"POST 202", http.MethodPost, stubRT{status: http.StatusAccepted}, true, true},
+		{"POST 500", http.MethodPost, stubRT{status: http.StatusInternalServerError}, true, true},
+		{"POST 404", http.MethodPost, stubRT{status: http.StatusNotFound}, true, false},
+		{"POST transport error", http.MethodPost, stubRT{err: errors.New("reset")}, true, true},
+		{"GET 200", http.MethodGet, stubRT{status: http.StatusOK}, true, false},
+		{"DELETE 200", http.MethodDelete, stubRT{status: http.StatusOK}, true, false},
+		{"POST 200 without attempt", http.MethodPost, stubRT{status: http.StatusOK}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &attempt{}
+			ctx := context.Background()
+			if tc.attempt {
+				ctx = context.WithValue(ctx, attemptKey{}, a)
+			}
+			req, err := http.NewRequestWithContext(ctx, tc.method, "http://upstream.invalid/mcp", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := &headerTransport{base: tc.rt, bearer: "tok"}
+			if resp, err := tr.RoundTrip(req); err == nil {
+				resp.Body.Close()
+			}
+			if got := a.reached.Load(); got != tc.want {
+				t.Fatalf("reached = %v, want %v", got, tc.want)
 			}
 		})
 	}
