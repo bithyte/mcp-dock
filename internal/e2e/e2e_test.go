@@ -30,6 +30,7 @@ import (
 
 	"github.com/bithyte/mcp-dock/internal/app"
 	"github.com/bithyte/mcp-dock/internal/config"
+	"github.com/bithyte/mcp-dock/internal/identity"
 	"github.com/bithyte/mcp-dock/internal/store"
 	"github.com/bithyte/mcp-dock/internal/testutil"
 )
@@ -44,6 +45,9 @@ const (
 	ghClientID     = "gh-cid"
 	ghClientSecret = "gh-secret"
 	clientRedirect = "http://127.0.0.1:33333/callback"
+	// The fake verifies grant signatures against the public key directly,
+	// so any https URL works as the gateway's own wallet.
+	gatewayWallet = "https://gateway.example/wallet"
 )
 
 // logBuffer is a goroutine-safe log sink.
@@ -82,18 +86,30 @@ type env struct {
 	ts   *httptest.Server
 	cfg  *config.Config
 	fake *testutil.FakeGitHub
+	op   *testutil.FakeOpenPayments
 	logs *logBuffer
 	app  *app.App
+	st   *store.Store
+	// cozminWallet is the normalized address of the fake's "cozmin" wallet.
+	cozminWallet string
 }
 
 // newEnv starts the full gateway with the fake upstream as "fake"
-// (deny_args [attachment.path]) plus any extra upstreams. Allowlist:
-// cozmin, friend.
+// (deny_args [attachment.path]) plus any extra upstreams. Both login
+// providers are on. Allowlists: GitHub cozmin and friend, and the fake
+// wallet "cozmin".
 func newEnv(t *testing.T, extra ...config.UpstreamConfig) *env {
 	t.Helper()
 	bin := testutil.BuildFakeUpstream(t)
 	e := &env{logs: &logBuffer{}}
 	e.fake = testutil.NewFakeGitHub(t, ghClientID, ghClientSecret)
+	keyPEM, pub := testutil.Ed25519PEM(t)
+	e.op = testutil.NewFakeOpenPayments(t, gatewayWallet, pub)
+	cozminWallet, err := identity.NormalizeWalletAddress(e.op.Wallet("cozmin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.cozminWallet = cozminWallet
 
 	// public_url must be known before the handler is built, so start the
 	// listener first and attach the handler afterwards.
@@ -101,10 +117,15 @@ func newEnv(t *testing.T, extra ...config.UpstreamConfig) *env {
 	publicURL := "http://" + e.ts.Listener.Addr().String()
 
 	e.cfg = &config.Config{
-		PublicURL:    publicURL,
-		DataDir:      t.TempDir(),
-		Providers:    config.ProvidersConfig{GitHub: &config.GitHubConfig{ClientID: ghClientID, ClientSecret: ghClientSecret}},
-		AllowedUsers: config.AllowedUsers{GitHub: []string{"cozmin", "friend"}},
+		PublicURL: publicURL,
+		DataDir:   t.TempDir(),
+		Providers: config.ProvidersConfig{
+			GitHub: &config.GitHubConfig{ClientID: ghClientID, ClientSecret: ghClientSecret},
+			OpenPayments: &config.OpenPaymentsConfig{
+				WalletAddress: gatewayWallet, KeyID: "e2e-key", PrivateKey: keyPEM,
+			},
+		},
+		AllowedUsers: config.AllowedUsers{GitHub: []string{"cozmin", "friend"}, OpenPayments: []string{cozminWallet}},
 		Upstreams: append([]config.UpstreamConfig{{
 			Name:     "fake",
 			Command:  bin,
@@ -118,6 +139,7 @@ func newEnv(t *testing.T, extra ...config.UpstreamConfig) *env {
 		t.Fatal(err)
 	}
 
+	e.st = st
 	getenv := func(k string) string {
 		if k == "PATH" {
 			return os.Getenv("PATH")
@@ -128,6 +150,7 @@ func newEnv(t *testing.T, extra ...config.UpstreamConfig) *env {
 		Version:          "test",
 		GitHubWebBaseURL: e.fake.URL,
 		GitHubAPIBaseURL: e.fake.URL,
+		OpenPaymentsHTTP: e.op.Client(),
 		MinBackoff:       50 * time.Millisecond,
 		MaxBackoff:       200 * time.Millisecond,
 	})
@@ -188,9 +211,9 @@ func expect(t *testing.T, step string, resp *http.Response, body string, status 
 	}
 }
 
-// login runs register, authorize, GitHub, callback, consent and token for
-// a GitHub user and returns the access token.
-func (e *env) login(t *testing.T, ghLogin string, ghID int64) string {
+// signIn runs register and /authorize and returns the browser, the sign-in
+// page's request id and the pieces needed to finish the code exchange.
+func (e *env) signIn(t *testing.T) (b *http.Client, requestID, clientID, verifier string) {
 	t.Helper()
 	rd := reader{t}
 	reg, _ := json.Marshal(map[string]any{
@@ -209,7 +232,7 @@ func (e *env) login(t *testing.T, ghLogin string, ghID int64) string {
 
 	vb := make([]byte, 32)
 	rand.Read(vb)
-	verifier := base64.RawURLEncoding.EncodeToString(vb)
+	verifier = base64.RawURLEncoding.EncodeToString(vb)
 	sum := sha256.Sum256([]byte(verifier))
 	q := url.Values{
 		"response_type":         {"code"},
@@ -221,19 +244,26 @@ func (e *env) login(t *testing.T, ghLogin string, ghID int64) string {
 		"resource":              {e.cfg.ResourceURL()},
 	}
 
-	e.fake.SetUser(ghLogin, ghID)
-	b := newBrowser(t)
+	b = newBrowser(t)
 	resp, body = rd.read(b.Get(e.ts.URL + "/authorize?" + q.Encode()))
-	expect(t, "authorize", resp, body, http.StatusFound)
-	resp, body = rd.read(b.Get(resp.Header.Get("Location"))) // fake GitHub
-	expect(t, "github", resp, body, http.StatusFound)
-	resp, body = rd.read(b.Get(resp.Header.Get("Location"))) // our callback
-	expect(t, "callback", resp, body, http.StatusOK)
+	expect(t, "authorize", resp, body, http.StatusOK) // sign-in page
 	m := requestField.FindStringSubmatch(body)
 	if m == nil {
-		t.Fatalf("no consent form: %s", body)
+		t.Fatalf("no request id on sign-in page: %s", body)
 	}
-	resp, body = rd.read(b.PostForm(e.ts.URL+"/oauth/consent", url.Values{"request": {m[1]}, "action": {"approve"}}))
+	return b, m[1], regResp.ClientID, verifier
+}
+
+// finish takes the browser from our login callback (a consent page) to an
+// access token.
+func (e *env) finish(t *testing.T, b *http.Client, consentPage, clientID, verifier string) string {
+	t.Helper()
+	rd := reader{t}
+	m := requestField.FindStringSubmatch(consentPage)
+	if m == nil {
+		t.Fatalf("no consent form: %s", consentPage)
+	}
+	resp, body := rd.read(b.PostForm(e.ts.URL+"/oauth/consent", url.Values{"request": {m[1]}, "action": {"approve"}}))
 	expect(t, "consent", resp, body, http.StatusFound)
 	loc, err := url.Parse(resp.Header.Get("Location"))
 	if err != nil || !strings.HasPrefix(loc.String(), clientRedirect) || loc.Query().Get("code") == "" {
@@ -242,7 +272,7 @@ func (e *env) login(t *testing.T, ghLogin string, ghID int64) string {
 
 	resp, body = rd.read(http.PostForm(e.ts.URL+"/token", url.Values{
 		"grant_type":    {"authorization_code"},
-		"client_id":     {regResp.ClientID},
+		"client_id":     {clientID},
 		"code":          {loc.Query().Get("code")},
 		"redirect_uri":  {clientRedirect},
 		"code_verifier": {verifier},
@@ -256,6 +286,53 @@ func (e *env) login(t *testing.T, ghLogin string, ghID int64) string {
 		t.Fatalf("token response %s: %v", body, err)
 	}
 	return tok.AccessToken
+}
+
+// login runs register, authorize, the sign-in page's GitHub button,
+// callback, consent and token for a GitHub user and returns the access token.
+func (e *env) login(t *testing.T, ghLogin string, ghID int64) string {
+	t.Helper()
+	rd := reader{t}
+	e.fake.SetUser(ghLogin, ghID)
+	b, reqID, clientID, verifier := e.signIn(t)
+	resp, body := rd.read(b.PostForm(e.ts.URL+"/oauth/github/start", url.Values{"request": {reqID}}))
+	expect(t, "github start", resp, body, http.StatusFound)
+	resp, body = rd.read(b.Get(resp.Header.Get("Location"))) // fake GitHub
+	expect(t, "github", resp, body, http.StatusFound)
+	resp, body = rd.read(b.Get(resp.Header.Get("Location"))) // our callback
+	expect(t, "callback", resp, body, http.StatusOK)
+	return e.finish(t, b, body, clientID, verifier)
+}
+
+// walletLogin is login for the Open Payments wallet called name on the fake:
+// wallet form, the user approving at the wallet provider, callback, consent
+// and token.
+func (e *env) walletLogin(t *testing.T, name string) string {
+	t.Helper()
+	rd := reader{t}
+	b, reqID, clientID, verifier := e.signIn(t)
+	resp, body := rd.read(b.PostForm(e.ts.URL+"/oauth/open-payments/start", url.Values{
+		"request": {reqID}, "wallet": {e.op.Wallet(name)},
+	}))
+	expect(t, "wallet start", resp, body, http.StatusFound)
+	interact := resp.Header.Get("Location")
+	if !strings.HasPrefix(interact, e.op.URL+"/interact/") {
+		t.Fatalf("wallet start Location %q", interact)
+	}
+	// The user approves at the wallet provider, which sends the browser back.
+	hc := *e.op.Client()
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, _ = rd.read(hc.Get(interact))
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("fake interact: status %d", resp.StatusCode)
+	}
+	cb := resp.Header.Get("Location")
+	if !strings.HasPrefix(cb, e.ts.URL+"/oauth/open-payments/callback?") {
+		t.Fatalf("interact Location %q", cb)
+	}
+	resp, body = rd.read(b.Get(cb))
+	expect(t, "wallet callback", resp, body, http.StatusOK)
+	return e.finish(t, b, body, clientID, verifier)
 }
 
 // --- MCP client ---
@@ -619,5 +696,78 @@ func TestEndToEndSessionBoundToUser(t *testing.T) {
 	// The owner's session still works.
 	if res := call(t, cozmin, "fake__echo", map[string]any{"text": "still mine"}); resultText(res) != "still mine" {
 		t.Fatalf("echo %q", resultText(res))
+	}
+}
+
+func TestEndToEndWallet(t *testing.T) {
+	e := newEnv(t)
+	token := e.walletLogin(t, "cozmin")
+	cs := e.connect(t, token, nil)
+	waitTools(t, cs, "fake__echo")
+	if res := call(t, cs, "fake__echo", map[string]any{"text": "hi"}); res.IsError || resultText(res) != "hi" {
+		t.Fatalf("echo: isError=%v %q", res.IsError, resultText(res))
+	}
+
+	want := identity.WalletUser(e.cozminWallet)
+	var logged bool
+	for _, r := range e.logs.records("tool call") {
+		if r["tool"] == "fake__echo" {
+			logged = true
+			if r["user"] != want || r["ok"] != true {
+				t.Errorf("audit record %v, want user %s ok true", r, want)
+			}
+		}
+	}
+	if !logged {
+		t.Fatalf("no audit record for fake__echo in logs:\n%s", e.logs)
+	}
+	if strings.Contains(e.logs.String(), token) {
+		t.Fatal("access token appears in logs")
+	}
+}
+
+// A GitHub user and a wallet user that share the name "cozmin" are two
+// users: separate audit identities, and resetting one leaves the other.
+func TestEndToEndSameNameDifferentUsers(t *testing.T) {
+	e := newEnv(t)
+	ghToken := e.login(t, "cozmin", 1)
+	walletToken := e.walletLogin(t, "cozmin")
+	gh := e.connect(t, ghToken, nil)
+	wallet := e.connect(t, walletToken, nil)
+	waitTools(t, gh, "fake__echo")
+	waitTools(t, wallet, "fake__echo")
+	call(t, gh, "fake__echo", map[string]any{"text": "gh"})
+	call(t, wallet, "fake__echo", map[string]any{"text": "wallet"})
+
+	walletUID := identity.WalletUser(e.cozminWallet)
+	users := map[string]bool{}
+	for _, r := range e.logs.records("tool call") {
+		users[r["user"].(string)] = true
+	}
+	if len(users) != 2 || !users["github:cozmin"] || !users[walletUID] {
+		t.Fatalf("audit users %v, want github:cozmin and %s", users, walletUID)
+	}
+
+	// What `users reset <wallet address>` does.
+	if err := e.st.ResetUser(context.Background(), walletUID); err != nil {
+		t.Fatal(err)
+	}
+	initialize := func(token string) int {
+		req, _ := http.NewRequest(http.MethodPost, e.cfg.ResourceURL(), strings.NewReader(
+			`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, _ := reader{t}.read(http.DefaultClient.Do(req))
+		return resp.StatusCode
+	}
+	if got := initialize(walletToken); got != http.StatusUnauthorized {
+		t.Fatalf("wallet token after reset: status %d, want 401", got)
+	}
+	if got := initialize(ghToken); got != http.StatusOK {
+		t.Fatalf("github token after wallet reset: status %d, want 200", got)
+	}
+	if res := call(t, gh, "fake__echo", map[string]any{"text": "still"}); resultText(res) != "still" {
+		t.Fatalf("github echo after reset: %q", resultText(res))
 	}
 }
