@@ -1,0 +1,4 @@
+update-notifier=false
+fund=false
+audit=false
+loglevel=warn
