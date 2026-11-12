@@ -1,0 +1,103 @@
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+  workflow_call:
+    inputs:
+      version:
+        description: Version X.Y.Z (no v prefix)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: publish-${{ inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/bithyte/mcp-dock
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve and validate version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          # Under workflow_call, github.ref_name is the caller's ref, so only
+          # use it on the tag-push path (no input).
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION=$INPUT_VERSION
+          else
+            VERSION=${REF_NAME#v}
+          fi
+          if ! [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "error: version '$VERSION' must match X.Y.Z" >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "MINOR=${VERSION%.*}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: refs/tags/v${{ env.VERSION }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - run: go test ./...
+
+      - name: Build release binaries
+        run: scripts/build-release-binaries.sh "$VERSION" dist
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # --load can't load a multi-platform image, so test each platform
+      # separately, then build both with --push (builder cache makes it cheap).
+      - name: Build and test amd64
+        run: |
+          docker buildx build --platform linux/amd64 --load -f Containerfile \
+            --build-arg VERSION="$VERSION" -t mcp-dock:test-amd64 .
+          CT=docker EXPECT_VERSION="$VERSION" scripts/test-image.sh mcp-dock:test-amd64
+
+      - name: Build and check arm64
+        run: |
+          docker buildx build --platform linux/arm64 --load -f Containerfile \
+            --build-arg VERSION="$VERSION" -t mcp-dock:test-arm64 .
+          got=$(docker run --rm --platform linux/arm64 --entrypoint mcp-dock mcp-dock:test-arm64 version)
+          if [ "$got" != "$VERSION" ]; then
+            echo "error: arm64 image reports '$got', expected '$VERSION'" >&2
+            exit 1
+          fi
+
+      - name: Push multi-arch image
+        run: |
+          docker buildx build --platform linux/amd64,linux/arm64 --push -f Containerfile \
+            --build-arg VERSION="$VERSION" \
+            -t "$IMAGE:$VERSION" -t "$IMAGE:$MINOR" -t "$IMAGE:latest" .
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')
+          if [ -z "$digest" ]; then
+            echo "error: could not read image digest" >&2
+            exit 1
+          fi
+          # --notes is prepended to the generated notes.
+          gh release create "v$VERSION" dist/* --verify-tag --generate-notes \
+            --notes "Image: \`$IMAGE:$VERSION\`, digest \`$digest\`"
