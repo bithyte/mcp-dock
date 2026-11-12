@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -136,6 +137,18 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 	return cfg, nil
 }
 
+// resolveCommand finds command at startup, so a missing one fails now rather
+// than on the first session. The result is absolute: LookPath resolves a
+// path with a slash against the runner's cwd, but the child runs in the
+// workdir.
+func resolveCommand(command string) (string, error) {
+	path, err := exec.LookPath(command)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(path)
+}
+
 // run starts the runner and returns when ctx is done. environ is the
 // process environment the child's is derived from.
 func run(ctx context.Context, args []string, getenv func(string) string, environ []string, stdout io.Writer) error {
@@ -150,8 +163,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, environ
 	if cfg.command == "" {
 		return usageError("missing command")
 	}
-	// Fail at startup rather than on the first session.
-	path, err := exec.LookPath(cfg.command)
+	path, err := resolveCommand(cfg.command)
 	if err != nil {
 		return fmt.Errorf("command %q: %w", cfg.command, err)
 	}

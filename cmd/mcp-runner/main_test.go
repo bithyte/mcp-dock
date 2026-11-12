@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -157,6 +158,33 @@ func TestMissingCommandFailsFast(t *testing.T) {
 	err := run(context.Background(), []string{"definitely-not-on-path-xyz"}, envOf(nil), nil, &out)
 	if err == nil || !strings.Contains(err.Error(), "definitely-not-on-path-xyz") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// The child runs in the workdir, not the runner's cwd, so a relative
+// command must be made absolute against the runner's cwd.
+func TestResolveCommandRelative(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "server"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	got, err := resolveCommand("./server")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(filepath.Join(dir, "server"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(got) {
+		t.Fatalf("resolveCommand(./server) = %q, want an absolute path", got)
+	}
+	if g, _ := filepath.EvalSymlinks(got); g != want {
+		t.Fatalf("resolveCommand(./server) = %q, want %q", got, want)
+	}
+	if _, err := resolveCommand("./missing"); err == nil {
+		t.Fatal("resolveCommand(./missing) succeeded")
 	}
 }
 
