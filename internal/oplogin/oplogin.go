@@ -26,6 +26,8 @@ var (
 	// ErrNotPending means the auth server did not answer the grant request
 	// with a pending interactive grant.
 	ErrNotPending = errors.New("open payments: grant is not pending interaction")
+
+	errNotFinalized = errors.New("open payments: continued grant is not finalized")
 )
 
 // Config configures a Client. WalletAddress, KeyID and PrivateKey come from
@@ -136,8 +138,8 @@ func (c *Client) Start(ctx context.Context, w Wallet, finishURI string) (Pending
 }
 
 // Finish verifies the interaction hash, continues the grant, checks that its
-// subject is p.WalletID, and then cancels the grant. A failed cancel is
-// logged and otherwise ignored.
+// result is a finalized grant whose subject is p.WalletID, and then cancels
+// the grant. A failed or skipped cancel is logged and otherwise ignored.
 func (c *Client) Finish(ctx context.Context, p Pending, interactRef, hash string) error {
 	if !VerifyHash(p.ClientNonce, p.FinishNonce, interactRef, p.AuthServer, hash) {
 		return ErrBadHash
@@ -148,8 +150,11 @@ func (c *Client) Finish(ctx context.Context, p Pending, interactRef, hash string
 	if err != nil {
 		return sanitize(err)
 	}
+	// A finalized grant has no further interaction to do. Only then is
+	// its subject the proven one.
+	finalized := g.Interact == nil
 	match := false
-	if g.Subject != nil {
+	if finalized && g.Subject != nil {
 		for _, s := range g.Subject.SubIds {
 			if s.Format == as.Uri && s.Id == p.WalletID {
 				match = true
@@ -158,10 +163,16 @@ func (c *Client) Finish(ctx context.Context, p Pending, interactRef, hash string
 		}
 	}
 	// Nothing is needed from the grant after this, so release it either way.
-	if err := c.op.Grant.Cancel(ctx, openpayments.GrantCancelParams{
+	// The signed cancel only goes to an https continue URI.
+	if !isHTTPS(g.Continue.Uri) {
+		c.log.Warn("open payments grant cancel skipped: continue uri is not https")
+	} else if err := c.op.Grant.Cancel(ctx, openpayments.GrantCancelParams{
 		URL: g.Continue.Uri, AccessToken: g.Continue.AccessToken.Value,
 	}); err != nil {
 		c.log.Warn("open payments grant cancel failed", "err", sanitize(err))
+	}
+	if !finalized {
+		return errNotFinalized
 	}
 	if !match {
 		return ErrSubjectMismatch

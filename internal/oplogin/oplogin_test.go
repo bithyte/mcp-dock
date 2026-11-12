@@ -176,6 +176,59 @@ func TestFinishSubjectMismatch(t *testing.T) {
 	if !errors.Is(err, ErrSubjectMismatch) {
 		t.Fatalf("err = %v, want ErrSubjectMismatch", err)
 	}
+	if n := f.Cancels(); n != 1 {
+		t.Fatalf("Cancels = %d, want 1", n)
+	}
+}
+
+func TestFinishRejectsNotFinalized(t *testing.T) {
+	c, f, _ := setup(t)
+	f.SetContinueInteract(true)
+	_, p := start(t, c, f, "alice")
+	q := interact(t, f, p.RedirectURL)
+	err := c.Finish(context.Background(), p, q.Get("interact_ref"), q.Get("hash"))
+	if err == nil {
+		t.Fatal("Finish accepted a continue result that still needs interaction")
+	}
+	if errors.Is(err, ErrSubjectMismatch) || errors.Is(err, ErrBadHash) {
+		t.Fatalf("err = %v, want a not-finalized error", err)
+	}
+}
+
+func TestFinishSkipsCancelOnHTTPContinueURI(t *testing.T) {
+	c, f, logs := setup(t)
+	var hits atomic.Int32
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer plain.Close()
+	f.SetContinueURI(plain.URL + "/continue/1")
+	_, p := start(t, c, f, "alice")
+	q := interact(t, f, p.RedirectURL)
+	if err := c.Finish(context.Background(), p, q.Get("interact_ref"), q.Get("hash")); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if hits.Load() != 0 || f.Cancels() != 0 {
+		t.Fatalf("cancel sent over http: hits=%d cancels=%d", hits.Load(), f.Cancels())
+	}
+	if !strings.Contains(logs.String(), "level=WARN") {
+		t.Fatalf("no warning logged: %q", logs.String())
+	}
+}
+
+func TestFinishUsesAdvertisedAuthServerInHash(t *testing.T) {
+	c, f, _ := setup(t)
+	as := f.AuthServer() + "?tenant=1" // still routed to the fake's /auth
+	f.SetAuthServer("alice", as)
+	w, p := start(t, c, f, "alice")
+	if w.AuthServer != as {
+		t.Fatalf("AuthServer = %q", w.AuthServer)
+	}
+	q := interact(t, f, p.RedirectURL)
+	if err := c.Finish(context.Background(), p, q.Get("interact_ref"), q.Get("hash")); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
 }
 
 func TestFinishCancelFailureIgnored(t *testing.T) {

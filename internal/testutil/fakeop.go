@@ -27,6 +27,7 @@ type fakeGrant struct {
 	asNonce       string
 	interactRef   string
 	continueToken string
+	authServer    string // as advertised by the wallet doc; hash input
 }
 
 // FakeOpenPayments is an in-process stand-in for an Open Payments wallet
@@ -46,6 +47,8 @@ type FakeOpenPayments struct {
 	authServers map[string]string // name -> authServer override
 	delay       time.Duration
 	cancelFail  bool
+	contInter   bool   // continue responses still carry interact
+	contURI     string // continue responses use this uri when set
 	grants      map[string]*fakeGrant
 	requests    []string
 	grantBodies [][]byte
@@ -116,6 +119,14 @@ func (f *FakeOpenPayments) SetDelay(d time.Duration) { f.set(func() { f.delay = 
 // SetCancelFail makes grant cancellation answer 500.
 func (f *FakeOpenPayments) SetCancelFail(v bool) { f.set(func() { f.cancelFail = v }) }
 
+// SetContinueInteract makes grant continuation answer with an interact
+// block, as if the grant were not finalized.
+func (f *FakeOpenPayments) SetContinueInteract(v bool) { f.set(func() { f.contInter = v }) }
+
+// SetContinueURI makes grant continuation return u as the continue uri.
+// Empty restores the default.
+func (f *FakeOpenPayments) SetContinueURI(u string) { f.set(func() { f.contURI = u }) }
+
 // Requests returns the "METHOD /path" log of every request received.
 func (f *FakeOpenPayments) Requests() []string {
 	f.mu.Lock()
@@ -165,6 +176,25 @@ func (f *FakeOpenPayments) knownID(id string) bool {
 	}
 	_, overridden := f.walletIDs[name]
 	return !overridden
+}
+
+// authServerFor returns the authServer that the document of the wallet
+// with id advertises. Callers hold f.mu.
+func (f *FakeOpenPayments) authServerFor(id string) string {
+	name := ""
+	for n, v := range f.walletIDs {
+		if v != "" && v == id {
+			name = n
+			break
+		}
+	}
+	if name == "" {
+		name, _ = strings.CutPrefix(id, f.URL+"/")
+	}
+	if as, ok := f.authServers[name]; ok {
+		return as
+	}
+	return f.AuthServer()
 }
 
 func (f *FakeOpenPayments) walletDoc(w http.ResponseWriter, r *http.Request) {
@@ -255,6 +285,7 @@ func (f *FakeOpenPayments) grantRequest(w http.ResponseWriter, r *http.Request) 
 	}
 	f.mu.Lock()
 	known := f.knownID(subs[0].ID)
+	authServer := f.authServerFor(subs[0].ID)
 	f.mu.Unlock()
 	if !known {
 		http.Error(w, "unknown subject", http.StatusBadRequest)
@@ -266,6 +297,7 @@ func (f *FakeOpenPayments) grantRequest(w http.ResponseWriter, r *http.Request) 
 		finishURI:     fin.URI,
 		clientNonce:   fin.Nonce,
 		asNonce:       randHex(),
+		authServer:    authServer,
 		continueToken: randHex(),
 	}
 	f.mu.Lock()
@@ -290,9 +322,9 @@ func (f *FakeOpenPayments) interact(w http.ResponseWriter, r *http.Request) {
 		if !decline {
 			g.interactRef = randHex()
 			ref = g.interactRef
-			hash = FakeOPHash(g.clientNonce, g.asNonce, ref, f.AuthServer())
+			hash = FakeOPHash(g.clientNonce, g.asNonce, ref, g.authServer)
 			if badHash {
-				hash = FakeOPHash(g.clientNonce, g.asNonce, ref+"x", f.AuthServer())
+				hash = FakeOPHash(g.clientNonce, g.asNonce, ref+"x", g.authServer)
 			}
 		}
 	}
@@ -333,7 +365,8 @@ func (f *FakeOpenPayments) continueGrant(w http.ResponseWriter, r *http.Request)
 	id := r.PathValue("id")
 	f.mu.Lock()
 	g, ok := f.grants[id]
-	var sub, tok string
+	var sub, tok, contURI string
+	var contInter bool
 	if ok && r.Header.Get("Authorization") == "GNAP "+g.continueToken &&
 		g.interactRef != "" && req.InteractRef == g.interactRef {
 		sub = g.subID
@@ -343,6 +376,7 @@ func (f *FakeOpenPayments) continueGrant(w http.ResponseWriter, r *http.Request)
 		g.continueToken = randHex()
 		g.interactRef = "" // single use
 		tok = g.continueToken
+		contURI, contInter = f.contURI, f.contInter
 	} else {
 		ok = false
 	}
@@ -351,12 +385,19 @@ func (f *FakeOpenPayments) continueGrant(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid continuation", http.StatusUnauthorized)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"subject": map[string]any{
 			"sub_ids": []map[string]string{{"id": sub, "format": "uri"}},
 		},
 		"continue": f.continueObj(id, tok),
-	})
+	}
+	if contURI != "" {
+		resp["continue"].(map[string]any)["uri"] = contURI
+	}
+	if contInter {
+		resp["interact"] = map[string]any{"redirect": f.URL + "/interact/" + id, "finish": randHex()}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (f *FakeOpenPayments) cancelGrant(w http.ResponseWriter, r *http.Request) {
