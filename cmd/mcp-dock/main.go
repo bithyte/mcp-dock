@@ -3,6 +3,7 @@
 //
 //	mcp-dock serve [-config path]
 //	mcp-dock users reset [-config path] <login>
+//	mcp-dock version
 //
 // The config path defaults to $MCP_DOCK_CONFIG, else ./config.yaml.
 package main
@@ -42,6 +43,7 @@ const (
 const usage = `usage:
   mcp-dock serve [-config path]
   mcp-dock users reset [-config path] <login>
+  mcp-dock version
 config path defaults to $MCP_DOCK_CONFIG, else ./config.yaml`
 
 func main() {
@@ -80,6 +82,12 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout 
 			return err
 		}
 		return serve(ctx, cfg, getenv, stdout)
+	case "version":
+		if len(args) > 1 {
+			return usageError("version takes no arguments")
+		}
+		fmt.Fprintln(stdout, version)
+		return nil
 	case "users":
 		if len(args) < 2 || args[1] != "reset" {
 			return usageError("unknown users command")

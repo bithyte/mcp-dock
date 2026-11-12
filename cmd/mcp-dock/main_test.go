@@ -144,6 +144,23 @@ func TestUsage(t *testing.T) {
 	}
 }
 
+func TestVersion(t *testing.T) {
+	old := version
+	version = "1.2.3"
+	t.Cleanup(func() { version = old })
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"version"}, testGetenv, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "1.2.3\n" {
+		t.Errorf("version printed %q, want %q", out.String(), "1.2.3\n")
+	}
+	err := run(context.Background(), []string{"version", "extra"}, testGetenv, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Errorf("version extra = %v, want usage error", err)
+	}
+}
+
 func TestBadConfig(t *testing.T) {
 	p, _ := writeConfig(t, ":8080", "")
 	noSecret := func(string) string { return "" }
