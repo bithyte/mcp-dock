@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bithyte/mcp-dock/internal/linelog"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -209,7 +210,7 @@ func (u *Upstream) runOnce(ctx context.Context) (time.Duration, error) {
 			return 0, fmt.Errorf("create workdir: %w", err)
 		}
 	}
-	stderr := newLineLogger(u.log)
+	stderr := linelog.New(u.log)
 	defer stderr.Flush()
 
 	cmd := exec.Command(u.opts.Command, u.opts.Args...)
