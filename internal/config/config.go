@@ -42,8 +42,8 @@ type OpenPaymentsConfig struct {
 	WalletAddress string `yaml:"wallet_address"` // normalized at load
 	KeyID         string `yaml:"key_id"`
 	PrivateKeyEnv string `yaml:"private_key_env"`
-	// PrivateKey is the env value as given (PEM text or base64 of the PEM),
-	// checked at load to hold an Ed25519 PKCS#8 key.
+	// PrivateKey is the normalized PEM text (trimmed; base64 already
+	// decoded), checked at load to hold an Ed25519 PKCS#8 key.
 	PrivateKey string `yaml:"-"`
 }
 
@@ -195,10 +195,11 @@ func (c *Config) validateProviders(getenv func(string) string) error {
 		if op.PrivateKeyEnv == "" {
 			return errors.New("providers.open_payments.private_key_env is required")
 		}
-		op.PrivateKey = getenv(op.PrivateKeyEnv)
-		if err := checkEd25519Key(op.PrivateKey); err != nil {
+		pemText, err := checkEd25519Key(getenv(op.PrivateKeyEnv))
+		if err != nil {
 			return fmt.Errorf("providers.open_payments.private_key_env: env var %s %w", op.PrivateKeyEnv, err)
 		}
+		op.PrivateKey = pemText
 	} else if len(c.AllowedUsers.OpenPayments) > 0 {
 		return errors.New("allowed_users.open_payments is set but providers.open_payments is not configured")
 	}
@@ -213,34 +214,35 @@ func (c *Config) validateProviders(getenv func(string) string) error {
 }
 
 // checkEd25519Key checks v is PEM text, or base64 of PEM text, holding an
-// Ed25519 PKCS#8 key. The returned error never includes v.
-func checkEd25519Key(v string) error {
+// Ed25519 PKCS#8 key, and returns the trimmed PEM text. The returned error
+// never includes v.
+func checkEd25519Key(v string) (string, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
-		return errors.New("is empty or unset")
+		return "", errors.New("is empty or unset")
 	}
 	if !strings.HasPrefix(v, "-----BEGIN") {
 		dec, err := base64.StdEncoding.DecodeString(v)
 		if err != nil {
-			return errors.New("must be PEM text or base64 of PEM text, not a file path")
+			return "", errors.New("must be PEM text or base64 of PEM text, not a file path")
 		}
 		v = strings.TrimSpace(string(dec))
 		if !strings.HasPrefix(v, "-----BEGIN") {
-			return errors.New("must be PEM text or base64 of PEM text, not a file path")
+			return "", errors.New("must be PEM text or base64 of PEM text, not a file path")
 		}
 	}
 	block, _ := pem.Decode([]byte(v))
 	if block == nil {
-		return errors.New("does not hold a valid PEM block")
+		return "", errors.New("does not hold a valid PEM block")
 	}
 	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
-		return errors.New("does not hold a PKCS#8 private key")
+		return "", errors.New("does not hold a PKCS#8 private key")
 	}
 	if _, ok := key.(ed25519.PrivateKey); !ok {
-		return errors.New("must hold an Ed25519 key")
+		return "", errors.New("must hold an Ed25519 key")
 	}
-	return nil
+	return v, nil
 }
 
 // validDenyPath reports whether d is a dotted path whose every segment is

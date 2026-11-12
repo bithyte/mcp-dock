@@ -46,6 +46,7 @@ type FakeOpenPayments struct {
 	walletIDs   map[string]string // name -> id override ("" omits id)
 	authServers map[string]string // name -> authServer override
 	delay       time.Duration
+	cancelDelay time.Duration
 	cancelFail  bool
 	contInter   bool   // continue responses still carry interact
 	contURI     string // continue responses use this uri when set
@@ -76,6 +77,9 @@ func NewFakeOpenPayments(t testing.TB, gatewayWallet string, gatewayPub ed25519.
 		f.mu.Lock()
 		f.requests = append(f.requests, r.Method+" "+r.URL.Path)
 		d := f.delay
+		if r.Method == http.MethodDelete {
+			d += f.cancelDelay
+		}
 		f.mu.Unlock()
 		if d > 0 {
 			select {
@@ -112,6 +116,9 @@ func (f *FakeOpenPayments) SetWalletID(name, id string) { f.set(func() { f.walle
 
 // SetAuthServer overrides the authServer in the document of wallet name.
 func (f *FakeOpenPayments) SetAuthServer(name, u string) { f.set(func() { f.authServers[name] = u }) }
+
+// SetCancelDelay additionally delays grant cancel (DELETE) responses by d.
+func (f *FakeOpenPayments) SetCancelDelay(d time.Duration) { f.set(func() { f.cancelDelay = d }) }
 
 // SetDelay delays every response by d (or until the client gives up).
 func (f *FakeOpenPayments) SetDelay(d time.Duration) { f.set(func() { f.delay = d }) }

@@ -118,7 +118,7 @@ The argument is a GitHub login (`cozmin` or `github:cozmin`) or a wallet address
 - TLS must be terminated by a reverse proxy in front, and it must preserve the public Host header.
 - Shutdown can take up to about 12s: up to 10s for open HTTP requests to drain, then closing the upstreams (about 2s each, in parallel). Set a container stop timeout of at least 15s.
 - Upstream stderr is logged verbatim (one `upstream stderr` record per line), so whatever an upstream prints, including anything sensitive, ends up in the gateway log.
-- No schema migrations yet. When upgrading across dev schema changes, delete `<data_dir>/gateway.db` (this invalidates all clients and tokens).
+- Existing GitHub logins are migrated automatically at startup; no manual database changes are needed.
 
 ## Manual verification (owner)
 

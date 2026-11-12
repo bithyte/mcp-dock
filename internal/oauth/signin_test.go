@@ -384,7 +384,7 @@ func TestWalletIDOtherOrigin(t *testing.T) {
 		reqID, _ := signinPage(t, c, ts, registerClient(t, ts, claudeRedirect))
 		resp, body := submitWallet(t, c, ts, reqID, fop.Wallet("cozmin"))
 		checkHTMLError(t, resp, http.StatusForbidden)
-		if !strings.Contains(body, "Open Payments wallet address") {
+		if !strings.Contains(body, "Open Payments wallet address "+fop.Wallet("cozmin")) || strings.Contains(body, id) {
 			t.Errorf("%s: body %s", id, body)
 		}
 		if hasRequest(fop, "POST /auth") {
@@ -638,7 +638,7 @@ func TestWalletNoSecretsLogged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.store.SetAuthRequestPending(ctx, reqID, raw); err != nil {
+	if err := srv.store.SetAuthRequestPending(ctx, reqID, raw, srv.now()); err != nil {
 		t.Fatal(err)
 	}
 	var pl pendingLogin

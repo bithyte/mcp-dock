@@ -231,6 +231,26 @@ func TestFinishUsesAdvertisedAuthServerInHash(t *testing.T) {
 	}
 }
 
+func TestFinishCancelHangDoesNotDelay(t *testing.T) {
+	old := cancelTimeout
+	cancelTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { cancelTimeout = old })
+	c, f, logs := setup(t)
+	f.SetCancelDelay(5 * time.Second)
+	_, p := start(t, c, f, "alice")
+	q := interact(t, f, p.RedirectURL)
+	t0 := time.Now()
+	if err := c.Finish(context.Background(), p, q.Get("interact_ref"), q.Get("hash")); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if d := time.Since(t0); d > 2*time.Second {
+		t.Fatalf("Finish took %v with a hung cancel", d)
+	}
+	if !strings.Contains(logs.String(), "grant cancel failed") {
+		t.Fatalf("no cancel warning: %q", logs.String())
+	}
+}
+
 func TestFinishCancelFailureIgnored(t *testing.T) {
 	c, f, logs := setup(t)
 	f.SetCancelFail(true)

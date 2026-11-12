@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bithyte/mcp-dock/internal/oplogin"
 	"github.com/bithyte/mcp-dock/internal/testutil"
 )
 
@@ -72,7 +73,7 @@ func TestLoadValid(t *testing.T) {
 	if c.AllowedUsers.OpenPayments[0] != "https://ilp.interledger-test.dev/cozmin" {
 		t.Fatalf("allowlist not normalized: %v", c.AllowedUsers.OpenPayments)
 	}
-	if c.Providers.OpenPayments.WalletAddress != "https://ilp.interledger-test.dev/mcp" || c.Providers.OpenPayments.PrivateKey != goodPEM {
+	if c.Providers.OpenPayments.WalletAddress != "https://ilp.interledger-test.dev/mcp" || c.Providers.OpenPayments.PrivateKey != strings.TrimSpace(goodPEM) {
 		t.Fatalf("bad open_payments: %+v", c.Providers.OpenPayments)
 	}
 	if c.PublicURL != "https://mcp.cozminu.com" {
@@ -188,8 +189,27 @@ func TestLoadAcceptsBase64Key(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Providers.OpenPayments.PrivateKey != e["OP_PRIVATE_KEY"] {
-		t.Fatal("PrivateKey should keep the original env value")
+	if c.Providers.OpenPayments.PrivateKey != strings.TrimSpace(goodPEM) {
+		t.Fatal("PrivateKey should be the decoded PEM")
+	}
+}
+
+func TestLoadNormalizesPaddedKey(t *testing.T) {
+	for name, v := range map[string]string{
+		"pem":    "  \n" + goodPEM + "\n  ",
+		"base64": "  " + base64.StdEncoding.EncodeToString([]byte(goodPEM)) + " \n",
+	} {
+		c, err := Load(write(t, validYAML), env(withKey(v)))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		op := c.Providers.OpenPayments
+		if op.PrivateKey != strings.TrimSpace(goodPEM) {
+			t.Fatalf("%s: PrivateKey not normalized", name)
+		}
+		if _, err := oplogin.New(oplogin.Config{WalletAddress: op.WalletAddress, KeyID: op.KeyID, PrivateKey: op.PrivateKey}); err != nil {
+			t.Fatalf("%s: oplogin.New: %v", name, err)
+		}
 	}
 }
 

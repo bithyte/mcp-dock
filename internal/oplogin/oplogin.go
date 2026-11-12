@@ -12,10 +12,15 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"time"
 
 	openpayments "github.com/interledger/open-payments-go"
 	as "github.com/interledger/open-payments-go/generated/authserver"
 )
+
+// cancelTimeout bounds the best-effort grant cancel (a var so tests can
+// shrink it).
+var cancelTimeout = 3 * time.Second
 
 var (
 	// ErrBadHash means the interaction finish hash did not verify.
@@ -163,13 +168,22 @@ func (c *Client) Finish(ctx context.Context, p Pending, interactRef, hash string
 		}
 	}
 	// Nothing is needed from the grant after this, so release it either way.
-	// The signed cancel only goes to an https continue URI.
-	if !isHTTPS(g.Continue.Uri) {
+	// The signed cancel only goes to an https continue URI. It gets its own
+	// short deadline so a hung endpoint can't hold up a proof that already
+	// succeeded.
+	if g.Continue.Uri == "" {
+		c.log.Warn("open payments grant cancel skipped: no continue uri")
+	} else if !isHTTPS(g.Continue.Uri) {
 		c.log.Warn("open payments grant cancel skipped: continue uri is not https")
-	} else if err := c.op.Grant.Cancel(ctx, openpayments.GrantCancelParams{
-		URL: g.Continue.Uri, AccessToken: g.Continue.AccessToken.Value,
-	}); err != nil {
-		c.log.Warn("open payments grant cancel failed", "err", sanitize(err))
+	} else {
+		cctx, cancel := context.WithTimeout(ctx, cancelTimeout)
+		err := c.op.Grant.Cancel(cctx, openpayments.GrantCancelParams{
+			URL: g.Continue.Uri, AccessToken: g.Continue.AccessToken.Value,
+		})
+		cancel()
+		if err != nil {
+			c.log.Warn("open payments grant cancel failed", "err", sanitize(err))
+		}
 	}
 	if !finalized {
 		return errNotFinalized

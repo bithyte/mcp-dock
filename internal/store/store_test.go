@@ -374,6 +374,14 @@ func TestMigrateBareLogins(t *testing.T) {
 	}
 	check()
 	check() // idempotent
+	s3, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s3.Close()
+	if id, ok, err := s3.GitHubID(ctx, "github:cozmin"); err != nil || !ok || id != 1 {
+		t.Fatalf("GitHubID after rename = %d, %v, %v; want 1", id, ok, err)
+	}
 }
 
 func saveReq(t *testing.T, s *Store, id string, exp time.Time) {
@@ -387,7 +395,7 @@ func TestPendingClaimOnce(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()
 	saveReq(t, s, "a", time.Now().Add(time.Hour))
-	if err := s.SetAuthRequestPending(ctx, "a", `{"x":1}`); err != nil {
+	if err := s.SetAuthRequestPending(ctx, "a", `{"x":1}`, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.ClaimAuthRequestPending(ctx, "a", time.Now())
@@ -403,7 +411,7 @@ func TestPendingClaimConcurrent(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()
 	saveReq(t, s, "a", time.Now().Add(time.Hour))
-	if err := s.SetAuthRequestPending(ctx, "a", "blob"); err != nil {
+	if err := s.SetAuthRequestPending(ctx, "a", "blob", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	var wins atomic.Int32
@@ -428,7 +436,7 @@ func TestPendingOverwrite(t *testing.T) {
 	ctx := context.Background()
 	saveReq(t, s, "a", time.Now().Add(time.Hour))
 	for _, v := range []string{"a", "b"} {
-		if err := s.SetAuthRequestPending(ctx, "a", v); err != nil {
+		if err := s.SetAuthRequestPending(ctx, "a", v, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -441,13 +449,13 @@ func TestPendingRejectedAfterLogin(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()
 	saveReq(t, s, "a", time.Now().Add(time.Hour))
-	if err := s.SetAuthRequestPending(ctx, "a", "p"); err != nil {
+	if err := s.SetAuthRequestPending(ctx, "a", "p", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetAuthRequestUser(ctx, "a", "github:x", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetAuthRequestPending(ctx, "a", "q"); !errors.Is(err, ErrNotFound) {
+	if err := s.SetAuthRequestPending(ctx, "a", "q", time.Now()); !errors.Is(err, ErrNotFound) {
 		t.Errorf("set after login err = %v, want ErrNotFound", err)
 	}
 	if _, err := s.ClaimAuthRequestPending(ctx, "a", time.Now()); !errors.Is(err, ErrNotFound) {
@@ -460,17 +468,17 @@ func TestPendingExpired(t *testing.T) {
 	ctx := context.Background()
 	exp := time.Now().Add(time.Hour)
 	saveReq(t, s, "a", exp)
-	if err := s.SetAuthRequestPending(ctx, "a", "p"); err != nil {
+	if err := s.SetAuthRequestPending(ctx, "a", "p", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ClaimAuthRequestPending(ctx, "a", exp.Add(time.Second)); !errors.Is(err, ErrNotFound) {
 		t.Errorf("claim after expiry err = %v, want ErrNotFound", err)
 	}
 	saveReq(t, s, "b", time.Now().Add(-time.Second))
-	if err := s.SetAuthRequestPending(ctx, "b", "p"); !errors.Is(err, ErrNotFound) {
+	if err := s.SetAuthRequestPending(ctx, "b", "p", time.Now()); !errors.Is(err, ErrNotFound) {
 		t.Errorf("set on expired err = %v, want ErrNotFound", err)
 	}
-	if err := s.SetAuthRequestPending(ctx, "missing", "p"); !errors.Is(err, ErrNotFound) {
+	if err := s.SetAuthRequestPending(ctx, "missing", "p", time.Now()); !errors.Is(err, ErrNotFound) {
 		t.Errorf("set on missing err = %v, want ErrNotFound", err)
 	}
 }
@@ -496,7 +504,7 @@ func TestPendingColumnMigration(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx := context.Background()
-		if err := s.SetAuthRequestPending(ctx, "old", "p"); err != nil {
+		if err := s.SetAuthRequestPending(ctx, "old", "p", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		if got, err := s.ClaimAuthRequestPending(ctx, "old", time.Now()); err != nil || got != "p" {

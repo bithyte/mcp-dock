@@ -88,12 +88,12 @@ func (s *Store) SetAuthRequestUser(ctx context.Context, id, userID string, githu
 
 // SetAuthRequestPending stores an opaque provider blob (it may hold a
 // continue token, so callers must never log it) on an unexpired auth request
-// that has no login yet, replacing any earlier blob. ErrNotFound if no row
+// that has no login yet at now, replacing any earlier blob. ErrNotFound if no row
 // matched.
-func (s *Store) SetAuthRequestPending(ctx context.Context, id, pending string) error {
+func (s *Store) SetAuthRequestPending(ctx context.Context, id, pending string, now time.Time) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE auth_requests SET pending=? WHERE id=? AND login='' AND expires_at>?`,
-		pending, id, ts(time.Now()))
+		pending, id, ts(now))
 	if err != nil {
 		return err
 	}

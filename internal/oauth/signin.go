@@ -126,7 +126,7 @@ func (s *Server) handleOPStart(w http.ResponseWriter, r *http.Request) {
 	if !sameOrigin(addr, idAddr) {
 		s.log.Warn("open payments wallet id on another origin", "wallet", addr, "wallet_id", idAddr)
 		s.abandon(w, r, ar)
-		s.notAllowed(w, identity.WalletUser(idAddr))
+		s.notAllowed(w, uid)
 		return
 	}
 	if !s.cfg.IsAllowed(identity.WalletUser(idAddr)) {
@@ -149,7 +149,7 @@ func (s *Server) handleOPStart(w http.ResponseWriter, r *http.Request) {
 	}
 	// A resubmitted form replaces the earlier attempt's state, so only the
 	// newest attempt can finish.
-	err = s.store.SetAuthRequestPending(r.Context(), ar.ID, string(blob))
+	err = s.store.SetAuthRequestPending(r.Context(), ar.ID, string(blob), s.now())
 	if errors.Is(err, store.ErrNotFound) {
 		s.badLink(w)
 		return
