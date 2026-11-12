@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -88,7 +87,33 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
+	if err := migrateBareLogins(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
+}
+
+// migrateBareLogins rewrites logins stored before ids were provider
+// prefixed ("Cozmin") to "github:cozmin". Rows that already contain a colon
+// and the empty login of a not yet signed-in auth request are left alone, so
+// it is safe to run on every Open.
+func migrateBareLogins(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("migrate logins: %w", err)
+	}
+	defer tx.Rollback()
+	for _, t := range []string{"auth_requests", "codes", "tokens", "consents", "users"} {
+		q := "UPDATE " + t + " SET login = 'github:' || lower(login) WHERE login <> '' AND instr(login, ':') = 0"
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("migrate logins in %s: %w", t, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migrate logins: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -106,8 +131,6 @@ func (s *Store) DeleteExpired(ctx context.Context, now time.Time) error {
 func ts(t time.Time) int64 { return t.UnixNano() }
 
 func fromTS(n int64) time.Time { return time.Unix(0, n).UTC() }
-
-func norm(login string) string { return strings.ToLower(login) }
 
 func notFound(err error) error {
 	if errors.Is(err, sql.ErrNoRows) {

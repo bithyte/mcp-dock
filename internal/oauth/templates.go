@@ -21,7 +21,7 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 <title>Authorize {{.ClientName}}</title>` + pageStyle + `</head>
 <body>
 <h1>Authorize access to mcp-dock</h1>
-<p>Signed in with GitHub as <strong>{{.Login}}</strong>.</p>
+<p>Signed in with {{.Provider}} as <strong>{{.Name}}</strong>.</p>
 <div class="box">
 <p>The application <strong>{{.ClientName}}</strong> wants to use the tools on this gateway as you.</p>
 <p>If you approve, you'll be sent back to <strong>{{.Redirect}}</strong>.</p>
@@ -45,7 +45,7 @@ var errorTmpl = template.Must(template.New("error").Parse(`<!doctype html>
 `))
 
 type consentData struct {
-	ClientName, Redirect, Login, RequestID string
+	ClientName, Redirect, Provider, Name, RequestID string
 }
 
 type errorData struct {

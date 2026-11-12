@@ -126,7 +126,7 @@ func TestMCPInvalidToken(t *testing.T) {
 func TestMCPValidToken(t *testing.T) {
 	f := newFixture(t)
 	rec := httptest.NewRecorder()
-	f.h.ServeHTTP(rec, mcpRequest(f.token(t, "cozmin")))
+	f.h.ServeHTTP(rec, mcpRequest(f.token(t, "github:cozmin")))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -142,7 +142,7 @@ func TestMCPHostCheck(t *testing.T) {
 	f := newFixture(t)
 	ts := httptest.NewServer(f.h)
 	t.Cleanup(ts.Close)
-	tok := f.token(t, "cozmin")
+	tok := f.token(t, "github:cozmin")
 
 	for _, tc := range []struct {
 		host, origin string

@@ -393,8 +393,8 @@ func TestEndToEnd(t *testing.T) {
 	for _, r := range e.logs.records("tool call") {
 		if r["tool"] == "fake__echo" {
 			echoLogged = true
-			if r["user"] != "cozmin" || r["ok"] != true {
-				t.Errorf("audit record %v, want user cozmin ok true", r)
+			if r["user"] != "github:cozmin" || r["ok"] != true {
+				t.Errorf("audit record %v, want user github:cozmin ok true", r)
 			}
 		}
 	}
@@ -467,7 +467,7 @@ func TestEndToEndTwoUsers(t *testing.T) {
 	for _, r := range e.logs.records("tool call") {
 		users[r["user"].(string)] = true
 	}
-	if !users["cozmin"] || !users["friend"] {
+	if !users["github:cozmin"] || !users["github:friend"] {
 		t.Fatalf("audit users %v, want cozmin and friend", users)
 	}
 }

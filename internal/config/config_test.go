@@ -116,11 +116,13 @@ func TestLoadRejects(t *testing.T) {
 
 func TestIsAllowedCaseInsensitive(t *testing.T) {
 	c := &Config{AllowedUsers: []string{"Cozmin"}}
-	if !c.IsAllowed("cozmin") || !c.IsAllowed("COZMIN") {
+	if !c.IsAllowed("github:cozmin") || !c.IsAllowed("github:COZMIN") {
 		t.Fatal("expected allowed")
 	}
-	if c.IsAllowed("other") {
-		t.Fatal("expected denied")
+	for _, id := range []string{"github:other", "cozmin", "open_payments:https://w.example/cozmin"} {
+		if c.IsAllowed(id) {
+			t.Fatalf("expected %q denied", id)
+		}
 	}
 }
 

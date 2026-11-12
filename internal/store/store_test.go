@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/bithyte/mcp-dock/internal/identity"
 )
 
 func openTest(t *testing.T) (*Store, string) {
@@ -49,11 +51,11 @@ func TestAuthRequestFlow(t *testing.T) {
 	if err := s.SaveAuthRequest(ctx, r); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetAuthRequestUser(ctx, "a1", "Cozmin", 7); err != nil {
+	if err := s.SetAuthRequestUser(ctx, "a1", identity.GitHubUser("Cozmin"), 7); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.GetAuthRequest(ctx, "a1")
-	if err != nil || got.Login != "cozmin" || got.GitHubID != 7 {
+	if err != nil || got.Login != "github:cozmin" || got.GitHubID != 7 {
 		t.Fatalf("%+v %v", got, err)
 	}
 	if err := s.DeleteAuthRequest(ctx, "a1"); err != nil {
@@ -77,7 +79,7 @@ func TestConsumeAuthRequestOnce(t *testing.T) {
 	if err := s.SaveAuthRequest(ctx, r); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetAuthRequestUser(ctx, "a1", "Cozmin", 7); err != nil {
+	if err := s.SetAuthRequestUser(ctx, "a1", identity.GitHubUser("Cozmin"), 7); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.ConsumeAuthRequest(ctx, "a1", now)
@@ -86,7 +88,7 @@ func TestConsumeAuthRequestOnce(t *testing.T) {
 	}
 	if got.ID != "a1" || got.ClientID != "c" || got.RedirectURI != "r" || got.ClientState != "st" ||
 		got.CodeChallenge != "ch" || got.Resource != "res" || got.Scope != "sc" ||
-		got.Login != "cozmin" || got.GitHubID != 7 {
+		got.Login != "github:cozmin" || got.GitHubID != 7 {
 		t.Fatalf("consumed %+v", got)
 	}
 	if _, err := s.ConsumeAuthRequest(ctx, "a1", now); !errors.Is(err, ErrNotFound) {
@@ -105,9 +107,9 @@ func TestCodeSingleUse(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()
 	now := time.Now()
-	s.SaveCode(ctx, Code{Hash: "h", ClientID: "c", Login: "Bob", ExpiresAt: now.Add(time.Minute)})
+	s.SaveCode(ctx, Code{Hash: "h", ClientID: "c", Login: identity.GitHubUser("Bob"), ExpiresAt: now.Add(time.Minute)})
 	c, err := s.ConsumeCode(ctx, "h", now)
-	if err != nil || c.Login != "bob" || c.ClientID != "c" {
+	if err != nil || c.Login != "github:bob" || c.ClientID != "c" {
 		t.Fatalf("%+v %v", c, err)
 	}
 	if _, err := s.ConsumeCode(ctx, "h", now); !errors.Is(err, ErrNotFound) {
@@ -129,8 +131,8 @@ func TestRefreshSingleUse(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()
 	now := time.Now()
-	s.SaveToken(ctx, Token{Hash: "r", Kind: "refresh", Login: "bob", ExpiresAt: now.Add(time.Hour)})
-	s.SaveToken(ctx, Token{Hash: "a", Kind: "access", Login: "bob", ExpiresAt: now.Add(time.Hour)})
+	s.SaveToken(ctx, Token{Hash: "r", Kind: "refresh", Login: identity.GitHubUser("bob"), ExpiresAt: now.Add(time.Hour)})
+	s.SaveToken(ctx, Token{Hash: "a", Kind: "access", Login: identity.GitHubUser("bob"), ExpiresAt: now.Add(time.Hour)})
 	if _, err := s.ConsumeRefreshToken(ctx, "a", now); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("access must not be consumable as refresh: %v", err)
 	}
@@ -177,14 +179,14 @@ func TestConcurrentConsumeCode(t *testing.T) {
 func TestLoginCaseFolding(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()
-	if err := s.SetGitHubID(ctx, "Cozmin", 1); err != nil {
+	if err := s.SetGitHubID(ctx, identity.GitHubUser("Cozmin"), 1); err != nil {
 		t.Fatal(err)
 	}
-	id, ok, err := s.GitHubID(ctx, "cozmin")
+	id, ok, err := s.GitHubID(ctx, identity.GitHubUser("cozmin"))
 	if err != nil || !ok || id != 1 {
 		t.Fatalf("%d %v %v", id, ok, err)
 	}
-	if _, ok, _ := s.GitHubID(ctx, "other"); ok {
+	if _, ok, _ := s.GitHubID(ctx, identity.GitHubUser("other")); ok {
 		t.Fatal("unexpected ok")
 	}
 }
@@ -193,21 +195,21 @@ func TestResetUser(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()
 	now := time.Now()
-	s.SetGitHubID(ctx, "Bob", 5)
-	s.SaveConsent(ctx, "bob", "c", "https://a.example/cb")
-	s.SaveConsent(ctx, "bob", "c", "https://b.example/cb")
-	s.SaveToken(ctx, Token{Hash: "t", Kind: "access", Login: "BOB", ExpiresAt: now.Add(time.Hour)})
-	if has, _ := s.HasConsent(ctx, "BOB", "c", "https://a.example/cb"); !has {
+	s.SetGitHubID(ctx, identity.GitHubUser("Bob"), 5)
+	s.SaveConsent(ctx, identity.GitHubUser("bob"), "c", "https://a.example/cb")
+	s.SaveConsent(ctx, identity.GitHubUser("bob"), "c", "https://b.example/cb")
+	s.SaveToken(ctx, Token{Hash: "t", Kind: "access", Login: identity.GitHubUser("BOB"), ExpiresAt: now.Add(time.Hour)})
+	if has, _ := s.HasConsent(ctx, identity.GitHubUser("BOB"), "c", "https://a.example/cb"); !has {
 		t.Fatal("consent missing")
 	}
-	if err := s.ResetUser(ctx, "Bob"); err != nil {
+	if err := s.ResetUser(ctx, identity.GitHubUser("Bob")); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, _ := s.GitHubID(ctx, "bob"); ok {
+	if _, ok, _ := s.GitHubID(ctx, identity.GitHubUser("bob")); ok {
 		t.Fatal("id remains")
 	}
 	for _, u := range []string{"https://a.example/cb", "https://b.example/cb"} {
-		if has, _ := s.HasConsent(ctx, "bob", "c", u); has {
+		if has, _ := s.HasConsent(ctx, identity.GitHubUser("bob"), "c", u); has {
 			t.Fatalf("consent for %s remains", u)
 		}
 	}
@@ -220,10 +222,10 @@ func TestConsentPerRedirectURI(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()
 	const a, b = "https://claude.ai/api/mcp/auth_callback", "https://evil.example/cb"
-	if err := s.SaveConsent(ctx, "Bob", "c", a); err != nil {
+	if err := s.SaveConsent(ctx, identity.GitHubUser("Bob"), "c", a); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveConsent(ctx, "bob", "c", a); err != nil { // idempotent
+	if err := s.SaveConsent(ctx, identity.GitHubUser("bob"), "c", a); err != nil { // idempotent
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -237,14 +239,14 @@ func TestConsentPerRedirectURI(t *testing.T) {
 		{"alice", "c", a, false},
 		{"bob", "c", "", false},
 	} {
-		if has, err := s.HasConsent(ctx, tc.login, tc.client, tc.uri); err != nil || has != tc.want {
+		if has, err := s.HasConsent(ctx, identity.GitHubUser(tc.login), tc.client, tc.uri); err != nil || has != tc.want {
 			t.Errorf("HasConsent(%q,%q,%q) = %v, %v; want %v", tc.login, tc.client, tc.uri, has, err, tc.want)
 		}
 	}
-	if err := s.SaveConsent(ctx, "bob", "c", b); err != nil {
+	if err := s.SaveConsent(ctx, identity.GitHubUser("bob"), "c", b); err != nil {
 		t.Fatal(err)
 	}
-	if has, _ := s.HasConsent(ctx, "bob", "c", b); !has {
+	if has, _ := s.HasConsent(ctx, identity.GitHubUser("bob"), "c", b); !has {
 		t.Fatal("second URI consent missing")
 	}
 }
@@ -268,7 +270,7 @@ func TestReopenKeepsData(t *testing.T) {
 	s, p := openTest(t)
 	ctx := context.Background()
 	now := time.Now()
-	s.SaveToken(ctx, Token{Hash: "t", Kind: "access", Login: "bob", ExpiresAt: now.Add(time.Hour)})
+	s.SaveToken(ctx, Token{Hash: "t", Kind: "access", Login: identity.GitHubUser("bob"), ExpiresAt: now.Add(time.Hour)})
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -280,4 +282,73 @@ func TestReopenKeepsData(t *testing.T) {
 	if _, err := s2.GetToken(ctx, "t", now); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestStoreKeepsWalletCase(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	const a = "https://claude.ai/api/mcp/auth_callback"
+	if err := s.SaveConsent(ctx, "open_payments:https://w.example/Al", "c", a); err != nil {
+		t.Fatal(err)
+	}
+	if has, _ := s.HasConsent(ctx, "open_payments:https://w.example/Al", "c", a); !has {
+		t.Error("exact wallet id has no consent")
+	}
+	if has, _ := s.HasConsent(ctx, "open_payments:https://w.example/al", "c", a); has {
+		t.Error("wallet ids must be case sensitive")
+	}
+}
+
+func TestMigrateBareLogins(t *testing.T) {
+	s, p := openTest(t)
+	ctx := context.Background()
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := s.db.ExecContext(ctx, q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`INSERT INTO users (login, github_id) VALUES ('Cozmin', 1), ('open_payments:https://w.example/Al', 2)`)
+	exec(`INSERT INTO consents (login, client_id, redirect_uri) VALUES ('Cozmin', 'c', 'r')`)
+	exec(`INSERT INTO tokens (hash, kind, client_id, login, resource, scope, expires_at) VALUES ('t1','access','c','cozmin','','',1), ('t2','access','c','Cozmin','','',1)`)
+	exec(`INSERT INTO codes (hash, client_id, redirect_uri, code_challenge, resource, scope, login, expires_at) VALUES ('c1','c','r','','','','Cozmin',1), ('c2','c','r','','','','cozmin',1)`)
+	exec(`INSERT INTO auth_requests (id, client_id, redirect_uri, client_state, code_challenge, resource, scope, login, github_id, expires_at) VALUES ('a1','c','r','','','','','',0,1)`)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	check := func() {
+		t.Helper()
+		s2, err := Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s2.Close()
+		for table, want := range map[string][]string{
+			"users":         {"github:cozmin", "open_payments:https://w.example/Al"},
+			"consents":      {"github:cozmin"},
+			"tokens":        {"github:cozmin", "github:cozmin"},
+			"codes":         {"github:cozmin", "github:cozmin"},
+			"auth_requests": {""},
+		} {
+			rows, err := s2.db.QueryContext(ctx, "SELECT login FROM "+table+" ORDER BY rowid")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for rows.Next() {
+				var l string
+				if err := rows.Scan(&l); err != nil {
+					t.Fatal(err)
+				}
+				got = append(got, l)
+			}
+			rows.Close()
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("%s logins = %q, want %q", table, got, want)
+			}
+		}
+	}
+	check()
+	check() // idempotent
 }

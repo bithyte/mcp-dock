@@ -403,10 +403,10 @@ func TestCallbackNotAllowed(t *testing.T) {
 	c := newBrowser(t)
 	resp, body := login(t, c, ts, fake, id, claudeRedirect)
 	checkHTMLError(t, resp, http.StatusForbidden)
-	if !strings.Contains(body, "GitHub account stranger isn&#39;t allowed on this gateway.") {
+	if !strings.Contains(body, "GitHub account stranger isn&#39;t allowed on this gateway.") || !strings.Contains(body, "GitHub account") {
 		t.Fatalf("body: %s", body)
 	}
-	if _, ok, _ := srv.store.GitHubID(context.Background(), "stranger"); ok {
+	if _, ok, _ := srv.store.GitHubID(context.Background(), "github:stranger"); ok {
 		t.Fatal("stranger's GitHub ID was pinned")
 	}
 }
@@ -521,7 +521,7 @@ func TestConsentApproveIssuesCode(t *testing.T) {
 		t.Fatalf("code not stored by hash: %v", err)
 	}
 	if got.ClientID != id || got.RedirectURI != claudeRedirect || got.CodeChallenge != testChallenge() ||
-		got.Login != "cozmin" || got.Resource != ts.URL+"/mcp" {
+		got.Login != "github:cozmin" || got.Resource != ts.URL+"/mcp" {
 		t.Fatalf("stored code %+v", got)
 	}
 	if d := got.ExpiresAt.Sub(srv.now()); d < 4*60e9 || d > 5*60e9+1e9 {
@@ -530,10 +530,10 @@ func TestConsentApproveIssuesCode(t *testing.T) {
 	if _, err := srv.store.GetAuthRequest(ctx, reqID); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("auth request not deleted: %v", err)
 	}
-	if ok, _ := srv.store.HasConsent(ctx, "cozmin", id, claudeRedirect); !ok {
+	if ok, _ := srv.store.HasConsent(ctx, "github:cozmin", id, claudeRedirect); !ok {
 		t.Error("consent not saved")
 	}
-	if gid, ok, _ := srv.store.GitHubID(ctx, "cozmin"); !ok || gid != 1 {
+	if gid, ok, _ := srv.store.GitHubID(ctx, "github:cozmin"); !ok || gid != 1 {
 		t.Errorf("github id %d %v", gid, ok)
 	}
 	// Replaying the consent POST, even with the cookie restored, issues nothing.
@@ -616,7 +616,7 @@ func TestConsentDeny(t *testing.T) {
 	if q.Get("error") != "access_denied" || q.Get("state") != testState || q.Get("iss") != ts.URL || q.Get("code") != "" {
 		t.Fatalf("query %v", q)
 	}
-	if ok, _ := srv.store.HasConsent(context.Background(), "cozmin", id, claudeRedirect); ok {
+	if ok, _ := srv.store.HasConsent(context.Background(), "github:cozmin", id, claudeRedirect); ok {
 		t.Error("consent saved on deny")
 	}
 }
@@ -792,7 +792,7 @@ func TestRedirectDisplay(t *testing.T) {
 func TestGitHubIDMismatchDenied(t *testing.T) {
 	srv, ts, fake, logs := newTestServerLogs(t)
 	id := registerClient(t, ts, claudeRedirect)
-	if err := srv.store.SetGitHubID(context.Background(), "cozmin", 1); err != nil {
+	if err := srv.store.SetGitHubID(context.Background(), "github:cozmin", 1); err != nil {
 		t.Fatal(err)
 	}
 	fake.SetUser("cozmin", 2)
@@ -803,14 +803,14 @@ func TestGitHubIDMismatchDenied(t *testing.T) {
 	}
 	var warn string
 	for _, line := range strings.Split(logs.String(), "\n") {
-		if strings.Contains(line, `"level":"WARN"`) && strings.Contains(line, `"login":"cozmin"`) {
+		if strings.Contains(line, `"level":"WARN"`) && strings.Contains(line, `"user":"github:cozmin"`) {
 			warn = line
 		}
 	}
 	if warn == "" || !strings.Contains(warn, `:1`) || !strings.Contains(warn, `:2`) {
 		t.Fatalf("no warn log with login and both IDs: %s", logs.String())
 	}
-	if gid, _, _ := srv.store.GitHubID(context.Background(), "cozmin"); gid != 1 {
+	if gid, _, _ := srv.store.GitHubID(context.Background(), "github:cozmin"); gid != 1 {
 		t.Errorf("pinned id changed to %d", gid)
 	}
 }
@@ -855,5 +855,15 @@ func TestConsentKey(t *testing.T) {
 		if got := consentKey(in); got != want {
 			t.Errorf("consentKey(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestConsentNamesProvider(t *testing.T) {
+	_, ts, fake := newTestServer(t)
+	id := registerClient(t, ts, claudeRedirect)
+	fake.SetUser("Cozmin", 1)
+	_, body := login(t, newBrowser(t), ts, fake, id, claudeRedirect)
+	if !strings.Contains(body, "Signed in with GitHub as <strong>Cozmin</strong>") {
+		t.Fatalf("body: %s", body)
 	}
 }

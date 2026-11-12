@@ -202,7 +202,7 @@ func TestTokenExchange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.UserID != "cozmin" || info.Scopes != nil {
+	if info.UserID != "github:cozmin" || info.Scopes != nil {
 		t.Errorf("info %+v", info)
 	}
 	if d := info.Expiration.Sub(clk.Now()); d != time.Hour {
@@ -598,7 +598,7 @@ func TestRefreshRotates(t *testing.T) {
 		t.Errorf("headers %v", r2.Header)
 	}
 	info, err := srv.Verify(context.Background(), r2.str("access_token"), nil)
-	if err != nil || info.UserID != "cozmin" {
+	if err != nil || info.UserID != "github:cozmin" {
 		t.Fatalf("new access: %+v %v", info, err)
 	}
 	// Reusing the rotated refresh token fails.
@@ -710,7 +710,7 @@ func TestVerifyWrongResource(t *testing.T) {
 	srv, _, _, clk := newTokenServer(t)
 	tok := newSecret()
 	err := srv.store.SaveToken(context.Background(), store.Token{
-		Hash: hashSecret(tok), Kind: "access", ClientID: "c", Login: "cozmin",
+		Hash: hashSecret(tok), Kind: "access", ClientID: "c", Login: "github:cozmin",
 		Resource: "https://other.example/mcp", ExpiresAt: clk.Now().Add(time.Hour),
 	})
 	if err != nil {
@@ -747,5 +747,18 @@ func TestTokenNoSecretsLogged(t *testing.T) {
 		if strings.Contains(out, s) {
 			t.Fatalf("log contains secret %q: %s", s, out)
 		}
+	}
+}
+
+func TestCallbackStoresPrefixedUser(t *testing.T) {
+	srv, ts, fake, _ := newTokenServer(t)
+	fake.SetUser("Cozmin", 1)
+	_, r := exchange(t, ts, fake)
+	info, err := srv.Verify(context.Background(), r.str("access_token"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.UserID != "github:cozmin" {
+		t.Errorf("UserID %q, want github:cozmin", info.UserID)
 	}
 }

@@ -16,6 +16,8 @@ import (
 	"unicode/utf8"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/bithyte/mcp-dock/internal/identity"
 )
 
 type Config struct {
@@ -144,10 +146,15 @@ func validDenyPath(d string) bool {
 	return true
 }
 
-// IsAllowed reports whether login is on the allowlist (case-insensitive).
-func (c *Config) IsAllowed(login string) bool {
+// IsAllowed reports whether the user id is on the allowlist. For now only
+// GitHub ids are recognized, matched case-insensitively.
+func (c *Config) IsAllowed(userID string) bool {
+	p, name, ok := identity.Split(userID)
+	if !ok || p != identity.GitHub {
+		return false
+	}
 	for _, u := range c.AllowedUsers {
-		if strings.EqualFold(u, login) {
+		if strings.EqualFold(u, name) {
 			return true
 		}
 	}
