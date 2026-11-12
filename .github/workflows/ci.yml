@@ -18,10 +18,17 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test ./...
-      - name: Build image (amd64 only; arm64 is checked at publish)
-        run: docker buildx build --load -f Containerfile --build-arg VERSION=0.0.0-ci -t mcp-dock:ci .
-      - name: Test image
+      - name: Build images (amd64 only; arm64 is checked at publish)
+        run: |
+          docker buildx build --load -f Containerfile --build-arg VERSION=0.0.0-ci -t mcp-dock:ci .
+          docker buildx build --load -f Containerfile.runner --build-arg VERSION=0.0.0-ci -t mcp-runner:ci .
+      - name: Test dock image
         env:
           CT: docker
           EXPECT_VERSION: 0.0.0-ci
         run: scripts/test-image.sh mcp-dock:ci
+      - name: Test runner image
+        env:
+          CT: docker
+          EXPECT_VERSION: 0.0.0-ci
+        run: scripts/test-runner-image.sh mcp-runner:ci
