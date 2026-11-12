@@ -18,19 +18,24 @@ CNAME="mcp-dock-test-$$"
 WORK=$(mktemp -d)
 DATA="$WORK/data"
 FAKE="$WORK/fake"
-mkdir -p "$DATA" "$FAKE"
-chmod 0777 "$DATA"
+CONF="$WORK/conf"
+mkdir -p "$DATA" "$FAKE" "$CONF"
+chmod 0755 "$FAKE" "$CONF"
 
-USERNS=()
-if [ "$CT" = podman ] && [ "$($CT info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" = true ]; then
-	USERNS=("--userns=keep-id:uid=65532,gid=65532")
-fi
+# Run a command as root in a throwaway container with $DATA mounted at /d.
+# Same path for podman and docker: mcp-dock chmods the data dir to 0700 as
+# uid 65532, so the host user can't read it afterwards (as on a docker runner).
+# Usage: data_root <mount-opts> <cmd...>
+data_root() {
+	local opts=$1
+	shift
+	$CT run --rm --user 0 -v "$DATA:/d$opts" --entrypoint "$1" "$IMAGE" "${@:2}"
+}
 
 # shellcheck disable=SC2317
 cleanup() {
 	$CT rm -f "$CNAME" >/dev/null 2>&1
-	$CT run --rm --user 0 --entrypoint rm -v "$DATA:/d" "$IMAGE" \
-		-rf /d/home /d/gateway.db /d/upstreams >/dev/null 2>&1
+	data_root "" find /d -mindepth 1 -delete >/dev/null 2>&1
 	rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -82,7 +87,7 @@ fi
 if ! (cd "$REPO_ROOT" && CGO_ENABLED=0 go build -o "$FAKE/fakeupstream" ./internal/testutil/fakeupstream); then
 	fail three_upstreams "building fakeupstream failed"
 fi
-cat >"$DATA/config.yaml" <<YAML
+cat >"$CONF/config.yaml" <<YAML
 public_url: http://localhost:8080
 listen: ":8080"
 data_dir: /data
@@ -100,7 +105,13 @@ upstreams:
   - name: bin
     command: /opt/fake/fakeupstream
 YAML
-chmod 0644 "$DATA/config.yaml"
+chmod 0644 "$CONF/config.yaml"
+
+# The host user doesn't own DATA from here on, so give it to 65532 up front.
+if ! data_root "" chown 65532:65532 /d >/dev/null 2>&1; then
+	fail three_upstreams "chown of data dir failed"
+	exit 1
+fi
 
 # Optional $1: number of log lines to skip (earlier runs of the same container).
 wait_started() {
@@ -123,9 +134,8 @@ wait_started() {
 
 if $CT run -d --name "$CNAME" \
 	--read-only --cap-drop=ALL --security-opt no-new-privileges --user 65532:65532 --tmpfs /tmp \
-	"${USERNS[@]}" \
 	-e GITHUB_CLIENT_SECRET=x \
-	-v "$DATA:/data" -v "$DATA/config.yaml:/etc/mcp-dock/config.yaml:ro" -v "$FAKE:/opt/fake:ro" \
+	-v "$DATA:/data" -v "$CONF/config.yaml:/etc/mcp-dock/config.yaml:ro" -v "$FAKE:/opt/fake:ro" \
 	-p 127.0.0.1::8080 "$IMAGE" >/dev/null 2>&1; then
 	:
 else
@@ -146,22 +156,27 @@ out=$(curl -s --max-time 10 "http://$hostport/healthz" 2>&1)
 if [ "$out" = ok ]; then ok healthz; else fail healthz "got '$out' from $hostport"; fi
 
 # 9. cache_persists
-snap() {
-	find "$DATA/home/.npm/_cacache/content-v2" -type f 2>/dev/null | sort
-	find "$DATA/home/.cache/uv/archive-v0" -mindepth 1 -maxdepth 1 2>/dev/null | sort
-}
-before=$(snap)
+# DATA is unreadable by the host, so list it from a root helper container.
+snap_npm() { data_root ":ro" sh -c 'find /d/home/.npm/_cacache/content-v2 -type f | sort'; }
+snap_uv() { data_root ":ro" sh -c 'find /d/home/.cache/uv/archive-v0 -mindepth 1 -maxdepth 1 | sort'; }
+before_npm=$(snap_npm 2>&1)
+before_uv=$(snap_uv 2>&1)
 skip=$($CT logs "$CNAME" 2>&1 | wc -l)
 $CT stop -t 20 "$CNAME" >/dev/null 2>&1
 $CT start "$CNAME" >/dev/null 2>&1
 # logs accumulate across restarts, so skip the lines from the first run.
 if logs=$(wait_started "$skip"); then
-	after=$(snap)
-	if [ -n "$before" ] && [ "$before" = "$after" ]; then
+	after_npm=$(snap_npm 2>&1)
+	after_uv=$(snap_uv 2>&1)
+	bad=""
+	if [ -z "$before_npm" ] || [ "$before_npm" != "$after_npm" ]; then bad="$bad npm"; fi
+	if [ -z "$before_uv" ] || [ "$before_uv" != "$after_uv" ]; then bad="$bad uv"; fi
+	if [ -z "$bad" ]; then
 		ok cache_persists
 	else
-		fail cache_persists "listings differ or empty"
-		diff <(echo "$before") <(echo "$after") | head -n 20
+		fail cache_persists "empty or changed listing for:$bad"
+		diff <(echo "$before_npm") <(echo "$after_npm") | head -n 10
+		diff <(echo "$before_uv") <(echo "$after_uv") | head -n 10
 	fi
 else
 	fail cache_persists "upstreams didn't come back, logs:"
@@ -169,6 +184,12 @@ else
 fi
 
 # 10. no_python_download
-if [ ! -e "$DATA/home/.local/share/uv/python" ]; then ok no_python_download; else fail no_python_download "uv downloaded a python"; fi
+# Distinguish "absent" from "couldn't check": the helper prints a marker.
+out=$(data_root ":ro" sh -c 'if [ -e /d/home/.local/share/uv/python ]; then echo present; else echo absent; fi' 2>&1)
+case "$out" in
+absent) ok no_python_download ;;
+present) fail no_python_download "uv downloaded a python" ;;
+*) fail no_python_download "couldn't check: $out" ;;
+esac
 
 exit $FAILED
