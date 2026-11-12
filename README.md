@@ -42,7 +42,7 @@ For rootless podman, add `--userns=keep-id:uid=65532,gid=65532` to the run comma
       -v ./config.yaml:/etc/mcp-dock/config.yaml:ro \
       ghcr.io/bithyte/mcp-dock:0.1.0
 
-`mcp-dock.env` holds the secrets (`GITHUB_CLIENT_SECRET=...`, `OP_PRIVATE_KEY=...` in its base64 form since env files are one line per var, whatever your upstreams' `env_from` names). Set `data_dir: /data` in the config. The image's default command is `serve` and `MCP_DOCK_CONFIG` is `/etc/mcp-dock/config.yaml`. Running it with no config doesn't print usage; to check the binary, use `docker run --rm --entrypoint mcp-dock ghcr.io/bithyte/mcp-dock:0.1.0 version`. The same commands work with `docker` in place of `podman`.
+`mcp-dock.env` holds the secrets (`GITHUB_CLIENT_SECRET=...`, `OP_PRIVATE_KEY=...` in its base64 form since env files are one line per var, and whatever your upstreams' `env_from` names). Set `data_dir: /data` in the config. The image's default command is `serve` and `MCP_DOCK_CONFIG` is `/etc/mcp-dock/config.yaml`. Running it with no config doesn't print usage; to check the binary, use `docker run --rm --entrypoint mcp-dock ghcr.io/bithyte/mcp-dock:0.1.0 version`. The same commands work with `docker` in place of `podman`.
 
 ### Upstreams
 
