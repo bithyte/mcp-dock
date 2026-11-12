@@ -847,3 +847,91 @@ func TestEndToEndRunnerCap(t *testing.T) {
 		t.Fatalf("echo %q", resultText(res))
 	}
 }
+
+// The child exiting on its own (no tool call) ends the runner session; the
+// Dock notices without a call, reconnects, and the tools come back.
+func TestEndToEndChildExitReconnects(t *testing.T) {
+	exit := filepath.Join(t.TempDir(), "exit")
+	e := newEnvWith(t, envOpts{runner: testutil.RunnerOptions{Mod: func(o *runner.Options) {
+		o.Env = append(o.Env, "FAKE_EXIT_WHEN="+exit)
+	}}})
+	cs := e.connect(t, e.login(t, "alice", 1), nil)
+	waitTools(t, cs, "fake__echo")
+	if err := os.WriteFile(exit, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !slices.ContainsFunc(e.logs.records("upstream exited"), func(r map[string]any) bool { return r["upstream"] == "fake" }) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no upstream exited log within 5s:\n%s", e.logs)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for !slices.Contains(toolNames(t, cs), "fake__echo") {
+		if time.Now().After(deadline) {
+			t.Fatalf("fake tools not back within 5s:\n%s", e.logs)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := len(e.logs.records("tool call")); n != 0 {
+		t.Fatalf("%d tool calls logged, want none", n)
+	}
+}
+
+// serveRunner serves a fresh runner for the fake upstream on ln. stop closes
+// the runner, then the server.
+func serveRunner(t *testing.T, ln net.Listener) (stop func()) {
+	t.Helper()
+	r := runner.New(runner.Options{
+		Command: testutil.BuildFakeUpstream(t),
+		Env:     []string{"PATH=" + os.Getenv("PATH")},
+		WorkDir: t.TempDir(),
+	})
+	srv := &http.Server{Handler: r.Handler()}
+	go srv.Serve(ln)
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			r.Close()
+			srv.Close()
+		})
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+// A runner restarted on the same address knows none of the old sessions:
+// the Dock's next call gets 404, which is safe to retry on a new session.
+func TestEndToEndRunnerRestart(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	stop := serveRunner(t, ln)
+	e := newEnv(t, config.UpstreamConfig{Name: "rr", URL: "http://" + addr + "/mcp"})
+	cs := e.connect(t, e.login(t, "alice", 1), nil)
+	waitTools(t, cs, "rr__echo")
+
+	stop()
+	ln, err = net.Listen("tcp", addr)
+	if err != nil {
+		t.Skipf("can't listen on %s again: %v", addr, err)
+	}
+	serveRunner(t, ln)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "rr__echo", Arguments: map[string]any{"text": "hi"}})
+	if err != nil {
+		t.Fatalf("echo after runner restart: %v", err)
+	}
+	if res.IsError || resultText(res) != "hi" {
+		t.Fatalf("echo after runner restart: isError=%v %q\n%s", res.IsError, resultText(res), e.logs)
+	}
+	// The call came before the Dock noticed (its GET stream reconnects after
+	// a second or more), so it went through the retry.
+	if !slices.ContainsFunc(e.logs.records("upstream session missing, retrying call"), func(r map[string]any) bool { return r["upstream"] == "rr" }) {
+		t.Fatalf("echo didn't go through the retry:\n%s", e.logs)
+	}
+}

@@ -38,6 +38,9 @@ const (
 	// closeGrace is how long a graceful session close (the DELETE to the
 	// upstream) may take before Run gives up on it.
 	closeGrace = 2 * time.Second
+
+	defaultPingInterval = 30 * time.Second
+	defaultPingTimeout  = 10 * time.Second
 )
 
 type Options struct {
@@ -54,6 +57,12 @@ type Options struct {
 	OnToolsChanged func() // called after tool cache changes (up, down, list_changed)
 	MinBackoff     time.Duration
 	MaxBackoff     time.Duration
+	// PingInterval is how often an up session is pinged; 0 means 30s. A
+	// failed ping ends the session, so a dead upstream is noticed even when
+	// there's no GET stream to fail.
+	PingInterval time.Duration
+	// PingTimeout bounds each ping; 0 means 10s.
+	PingTimeout time.Duration
 }
 
 // Upstream is safe for concurrent use. Calls are not serialized: each one is
@@ -68,6 +77,10 @@ type Upstream struct {
 	dead    chan struct{}      // closed when session's connection ends
 	live    context.Context    // canceled when the session is torn down
 	tools   []*mcp.Tool        // nil while down
+	// changed is closed and replaced whenever session changes, and once
+	// more when Run returns (stopped), to wake calls waiting for a session.
+	changed chan struct{}
+	stopped bool
 
 	progress sync.Map // progress token (string) -> func(*mcp.ProgressNotificationParams)
 	tokenSeq atomic.Uint64
@@ -85,8 +98,20 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		req = req.Clone(req.Context())
 		req.Header.Set("Authorization", "Bearer "+t.bearer)
 	}
-	return t.base.RoundTrip(req)
+	a, _ := req.Context().Value(attemptKey{}).(*attempt)
+	resp, err := t.base.RoundTrip(req)
+	if a != nil && req.Method == http.MethodPost && (err != nil || resp.StatusCode != http.StatusNotFound) {
+		a.reached.Store(true)
+	}
+	return resp, err
 }
+
+// attempt records whether a call's POST may have reached the upstream. The
+// call's ctx carries it down to the transport (the SDK sends the POST with
+// the call's ctx).
+type attempt struct{ reached atomic.Bool }
+
+type attemptKey struct{}
 
 // wrapClient returns a copy of base (or a default client) whose transport
 // adds the upstream's headers.
@@ -120,11 +145,40 @@ func New(opts Options) *Upstream {
 	if opts.Version == "" {
 		opts.Version = "dev"
 	}
-	return &Upstream{
-		opts: opts,
-		log:  log.With("upstream", opts.Name),
-		http: wrapClient(opts.HTTPClient, opts.BearerToken),
+	if opts.PingInterval <= 0 {
+		opts.PingInterval = defaultPingInterval
 	}
+	if opts.PingTimeout <= 0 {
+		opts.PingTimeout = defaultPingTimeout
+	}
+	return &Upstream{
+		opts:    opts,
+		log:     log.With("upstream", opts.Name),
+		http:    wrapClient(opts.HTTPClient, opts.BearerToken),
+		changed: make(chan struct{}),
+	}
+}
+
+// conn is one session's state as seen by a call.
+type conn struct {
+	s    *mcp.ClientSession
+	dead <-chan struct{}
+	live context.Context
+}
+
+// current returns the session state (s nil while down) and the channel that
+// is closed when it next changes.
+func (u *Upstream) current() (conn, <-chan struct{}, bool) {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return conn{u.session, u.dead, u.live}, u.changed, u.stopped
+}
+
+// setLocked replaces the session state and wakes waiters. u.mu must be held.
+func (u *Upstream) setLocked(s *mcp.ClientSession, tools []*mcp.Tool, dead chan struct{}, live context.Context) {
+	u.session, u.tools, u.dead, u.live = s, tools, dead, live
+	close(u.changed)
+	u.changed = make(chan struct{})
 }
 
 func (u *Upstream) Name() string { return u.opts.Name }
@@ -142,19 +196,17 @@ func (u *Upstream) Tools() []*mcp.Tool {
 // notifications for this call are passed to it; it runs on the session's
 // receive loop and must not block. Returns ErrUnavailable while down, and
 // ctx.Err() if ctx ends first (the SDK sends notifications/cancelled).
+//
+// A call is retried once, on the next session, only if its POST got a 404
+// for the session id: the runner answers that before handing the request to
+// a child, so the call can't have run. Any other failure isn't retried,
+// since the call may have had effects.
 func (u *Upstream) Call(ctx context.Context, tool string, args json.RawMessage,
 	onProgress func(*mcp.ProgressNotificationParams)) (*mcp.CallToolResult, error) {
-	u.mu.RLock()
-	s, dead, live := u.session, u.dead, u.live
-	u.mu.RUnlock()
-	if s == nil {
+	c, _, _ := u.current()
+	if c.s == nil {
 		return nil, ErrUnavailable
 	}
-	// End the request when the session is torn down, so shutdown doesn't
-	// wait on a call whose ctx never ends.
-	cctx, stop := context.WithCancel(ctx)
-	defer stop()
-	defer context.AfterFunc(live, stop)()
 	params := &mcp.CallToolParams{Name: tool}
 	if len(args) > 0 {
 		params.Arguments = args
@@ -165,17 +217,73 @@ func (u *Upstream) Call(ctx context.Context, tool string, args json.RawMessage,
 		u.progress.Store(token, onProgress)
 		defer u.progress.Delete(token)
 	}
-	res, err := s.CallTool(cctx, params)
-	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-		if live.Err() != nil || sessionLost(err, dead) {
-			return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
-		}
-		return nil, err
+	res, retry, err := u.callOn(ctx, c, params)
+	if !retry {
+		return res, err
 	}
-	return res, nil
+	u.log.Info("upstream session missing, retrying call", "tool", tool)
+	// The session is gone on the upstream; don't wait for the GET stream or
+	// a ping to notice. Close skips the DELETE for a missing session.
+	go func() { _ = c.s.Close() }()
+	next, werr := u.awaitSession(ctx, c.s)
+	if werr != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("%w: %v", werr, err)
+	}
+	res, _, err = u.callOn(ctx, next, params)
+	return res, err
+}
+
+// callOn makes one attempt on c and reports whether it's safe to retry on
+// another session.
+func (u *Upstream) callOn(ctx context.Context, c conn, params *mcp.CallToolParams) (*mcp.CallToolResult, bool, error) {
+	// End the request when the session is torn down, so shutdown doesn't
+	// wait on a call whose ctx never ends.
+	cctx, stop := context.WithCancel(ctx)
+	defer stop()
+	defer context.AfterFunc(c.live, stop)()
+	a := &attempt{}
+	res, err := c.s.CallTool(context.WithValue(cctx, attemptKey{}, a), params)
+	if err == nil {
+		return res, false, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, false, ctxErr
+	}
+	// ErrSessionMissing alone isn't enough: when any request gets the 404,
+	// the SDK fails the conn, and jsonrpc2 may retire calls still in flight
+	// with that same error even though they were sent. So also require that
+	// this call's own POST got the 404 (or never went out at all).
+	retry := errors.Is(err, mcp.ErrSessionMissing) && !a.reached.Load()
+	if c.live.Err() != nil || sessionLost(err, c.dead) {
+		return nil, retry, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	return nil, retry, err
+}
+
+// awaitSession waits for an up session other than old, bounded by
+// connectTimeout and ctx.
+func (u *Upstream) awaitSession(ctx context.Context, old *mcp.ClientSession) (conn, error) {
+	t := time.NewTimer(connectTimeout)
+	defer t.Stop()
+	for {
+		c, changed, stopped := u.current()
+		if c.s != nil && c.s != old {
+			return c, nil
+		}
+		if stopped {
+			return conn{}, ErrUnavailable
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return conn{}, ctx.Err()
+		case <-t.C:
+			return conn{}, ErrUnavailable
+		}
+	}
 }
 
 // sessionLost reports whether a failed call failed because the session with
@@ -207,6 +315,13 @@ func sessionLost(err error, dead <-chan struct{}) bool {
 // Run supervises the upstream until ctx is done. It never returns early:
 // start failures and exits are logged and retried with backoff.
 func (u *Upstream) Run(ctx context.Context) {
+	defer func() {
+		u.mu.Lock()
+		u.stopped = true
+		close(u.changed)
+		u.changed = make(chan struct{})
+		u.mu.Unlock()
+	}()
 	backoff := u.opts.MinBackoff
 	for {
 		uptime, err := u.runOnce(ctx)
@@ -285,7 +400,7 @@ func (u *Upstream) runOnce(ctx context.Context) (time.Duration, error) {
 	}()
 	live, kill := context.WithCancel(context.Background())
 	u.mu.Lock()
-	u.session, u.tools, u.dead, u.live = session, tools, dead, live
+	u.setLocked(session, tools, dead, live)
 	u.mu.Unlock()
 	u.log.Info("upstream started", "tools", len(tools))
 	u.notify()
@@ -296,11 +411,18 @@ func (u *Upstream) runOnce(ctx context.Context) (time.Duration, error) {
 		defer close(refreshDone)
 		u.refreshLoop(rctx, session, refresh)
 	}()
+	pingFailed := make(chan error, 1)
+	pingDone := make(chan struct{})
+	go func() {
+		defer close(pingDone)
+		u.pingLoop(rctx, session, pingFailed)
+	}()
 
 	select {
 	case <-ctx.Done():
 		err = nil
 	case err = <-exited:
+	case err = <-pingFailed:
 	}
 	uptime := time.Since(started)
 	rcancel()
@@ -308,14 +430,43 @@ func (u *Upstream) runOnce(ctx context.Context) (time.Duration, error) {
 	// Mark down before closing so new calls fail fast with ErrUnavailable,
 	// then end in-flight calls so Close doesn't wait on them.
 	u.mu.Lock()
-	u.session, u.tools, u.dead, u.live = nil, nil, nil, nil
+	u.setLocked(nil, nil, nil, nil)
 	u.mu.Unlock()
 	kill()
 	u.notify()
 
 	u.closeSession(session)
 	<-refreshDone
+	<-pingDone
 	return uptime, err
+}
+
+// pingLoop pings s every PingInterval. The first failure is logged and sent
+// on failed, which ends the session in runOnce. Without it, a dead upstream
+// can go unnoticed: the SDK tolerates a GET stream that's refused (405,
+// other 4xx) and retries a dropped one for many seconds.
+func (u *Upstream) pingLoop(ctx context.Context, s *mcp.ClientSession, failed chan<- error) {
+	t := time.NewTicker(u.opts.PingInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		pctx, cancel := context.WithTimeout(ctx, u.opts.PingTimeout)
+		err := s.Ping(pctx, nil)
+		cancel()
+		if err == nil {
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		u.log.Warn("upstream ping failed", "error", err.Error())
+		failed <- fmt.Errorf("ping: %w", err)
+		return
+	}
 }
 
 // closeSession closes the session, which DELETEs it on the upstream. If that

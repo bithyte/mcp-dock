@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/bithyte/mcp-dock/internal/runner"
 	"github.com/bithyte/mcp-dock/internal/testutil"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -350,10 +352,17 @@ func TestCrashRestarts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// The runner ends the POST stream without a response when the child
-	// dies, so the call fails; whether it maps to ErrUnavailable depends on
-	// whether the session has been seen to end yet.
-	if res, err := h.u.Call(ctx, "crash", json.RawMessage(`{}`), nil); err == nil {
+	// dies, so the call fails with a transport error (the SDK's "request
+	// terminated without response"), not an answer from the upstream. It
+	// isn't mapped to ErrUnavailable: the session hasn't been seen to end
+	// yet, and the call may have had effects, so it's not retried either.
+	res, err := h.u.Call(ctx, "crash", json.RawMessage(`{}`), nil)
+	if err == nil {
 		t.Fatalf("crash call returned %+v, want an error", res)
+	}
+	var wire *jsonrpc.Error
+	if errors.As(err, &wire) {
+		t.Fatalf("crash call err = %v, want a transport failure, not a JSON-RPC error", err)
 	}
 	// The runner ends the session, so the GET stream's reconnect gets a 404
 	// and the session ends without any further call.
@@ -362,17 +371,6 @@ func TestCrashRestarts(t *testing.T) {
 	if got := call(t, h.u, "echo", `{"text":"back"}`); got != "back" {
 		t.Fatalf("echo after restart = %q", got)
 	}
-}
-
-// failures counts "upstream start failed" style warnings for the fake upstream.
-func failures(t *testing.T, h *harness) int {
-	n := 0
-	for _, r := range h.logs.records(t) {
-		if r["upstream"] == h.u.Name() && r["level"] == "WARN" {
-			n++
-		}
-	}
-	return n
 }
 
 // startFailures counts "upstream start failed" warnings for the fake upstream.
@@ -508,5 +506,195 @@ func TestNextBackoff(t *testing.T) {
 		if wait != c.cur || next != c.want {
 			t.Errorf("nextBackoff(%v, up %v) = %v,%v; want %v,%v", c.cur, c.up, wait, next, c.cur, c.want)
 		}
+	}
+}
+
+// expirer is a runner Wrap that makes the first session look gone: GETs get
+// 405 (so the SDK runs without a standalone stream and can't notice a lost
+// session on its own), and once expire is set every request carrying the
+// first session id gets 404, before the runner sees it. It counts tools/call
+// POSTs per session id.
+type expirer struct {
+	expire atomic.Bool
+
+	mu    sync.Mutex
+	first string         // first session id seen
+	calls map[string]int // tools/call POSTs per session id
+}
+
+func newExpirer() *expirer { return &expirer{calls: map[string]int{}} }
+
+func (x *expirer) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("Mcp-Session-Id")
+		isCall := false
+		if r.Method == http.MethodPost {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			isCall = bytes.Contains(body, []byte(`"tools/call"`))
+		}
+		x.mu.Lock()
+		if x.first == "" && id != "" {
+			x.first = id
+		}
+		if isCall {
+			x.calls[id]++
+		}
+		old := id != "" && id == x.first
+		x.mu.Unlock()
+		if r.Method == http.MethodGet {
+			http.Error(w, "no standalone stream", http.StatusMethodNotAllowed)
+			return
+		}
+		if old && x.expire.Load() {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// counts returns the tools/call POST count on the first session and per
+// other session id.
+func (x *expirer) counts() (first int, others map[string]int) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	others = map[string]int{}
+	for id, n := range x.calls {
+		if id == x.first {
+			first = n
+		} else {
+			others[id] = n
+		}
+	}
+	return first, others
+}
+
+func hasLog(t *testing.T, h *harness, msg string) bool {
+	return slices.ContainsFunc(h.logs.records(t), func(r map[string]any) bool { return r["msg"] == msg })
+}
+
+func readLines(t *testing.T, path string) []string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return strings.Fields(string(b))
+}
+
+// With no GET stream, only the ping notices the session is gone.
+func TestPingDetectsDeadSession(t *testing.T) {
+	x := newExpirer()
+	h := startWith(t, testutil.RunnerOptions{Wrap: x.wrap}, func(o *Options) { o.PingInterval = 100 * time.Millisecond })
+	h.waitUp(t)
+	before := h.changeCount()
+	x.expire.Store(true)
+	eventually(t, 3*time.Second, "down after expire", func() bool { return h.sawDownAfter(before) })
+	eventually(t, 3*time.Second, "up again", func() bool { return h.u.Tools() != nil })
+	if !hasLog(t, h, "upstream ping failed") {
+		t.Fatal("no upstream ping failed log")
+	}
+	if first, others := x.counts(); first != 0 || len(others) != 0 {
+		t.Fatalf("tool calls made: first %d, others %v", first, others)
+	}
+}
+
+// A call on a session the runner no longer knows gets 404 before reaching a
+// child, so it's retried once on the new session.
+func TestRetryOnSessionMissing(t *testing.T) {
+	x := newExpirer()
+	h := startWith(t, testutil.RunnerOptions{Wrap: x.wrap}, func(o *Options) { o.PingInterval = time.Hour })
+	h.waitUp(t)
+	x.expire.Store(true)
+	if got := call(t, h.u, "echo", `{"text":"hi"}`); got != "hi" {
+		t.Fatalf("echo = %q, want hi", got)
+	}
+	first, others := x.counts()
+	if first != 1 || len(others) != 1 {
+		t.Fatalf("tools/call POSTs: first session %d, others %v; want 1 and one other with 1", first, others)
+	}
+	for id, n := range others {
+		if n != 1 {
+			t.Fatalf("session %s got %d tools/call POSTs, want 1", id, n)
+		}
+	}
+}
+
+// A call that reached the child is never retried, even though the child
+// died with it.
+func TestNoRetryAfterSend(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "calls")
+	h := startWith(t, childEnv("FAKE_CALL_LOG="+log), nil)
+	h.waitUp(t)
+	before := h.changeCount()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if res, err := h.u.Call(ctx, "crash", json.RawMessage(`{}`), nil); err == nil {
+		t.Fatalf("crash call returned %+v, want an error", res)
+	}
+	eventually(t, 10*time.Second, "down after crash", func() bool { return h.sawDownAfter(before) })
+	h.waitUp(t)
+	n := 0
+	for _, l := range readLines(t, log) {
+		if l == "crash" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("crash ran %d times, want 1 (log %v)", n, readLines(t, log))
+	}
+}
+
+// A call already in flight when another request finds the session gone was
+// sent, so it must not be retried. jsonrpc2 may retire such a call with the
+// conn's session-missing error; with go-sdk v1.8.0 it's instead ended by the
+// teardown (context canceled), so this passes even without Call's
+// reached check. It's here so a change in either doesn't go unnoticed.
+func TestNoRetryInFlightOnSessionMissing(t *testing.T) {
+	x := newExpirer()
+	log := filepath.Join(t.TempDir(), "calls")
+	ro := childEnv("FAKE_CALL_LOG=" + log)
+	ro.Wrap = x.wrap
+	h := startWith(t, ro, func(o *Options) { o.PingInterval = time.Hour })
+	h.waitUp(t)
+	slowErr := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := h.u.Call(ctx, "sleep", json.RawMessage(`{"ms":1500}`), nil)
+		slowErr <- err
+	}()
+	// No GET stream, so no progress either (the runner relays child
+	// notifications on it); the call log shows the child got the call.
+	eventually(t, 10*time.Second, "sleep reached the child", func() bool {
+		return slices.Contains(readLines(t, log), "sleep")
+	})
+	x.expire.Store(true)
+	if got := call(t, h.u, "echo", `{"text":"hi"}`); got != "hi" {
+		t.Fatalf("echo = %q, want hi", got)
+	}
+	select {
+	case err := <-slowErr:
+		if err == nil {
+			t.Fatal("in-flight sleep succeeded after its session was lost")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight sleep never returned")
+	}
+	// Give a wrongly retried sleep time to show up in the log.
+	time.Sleep(300 * time.Millisecond)
+	n := 0
+	for _, l := range readLines(t, log) {
+		if l == "sleep" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("sleep ran %d times, want 1 (log %v)", n, readLines(t, log))
 	}
 }
