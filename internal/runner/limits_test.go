@@ -2,6 +2,7 @@ package runner_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -272,5 +273,86 @@ func TestCloseDuringSpawn(t *testing.T) {
 		if err := syscall.Kill(pid, 0); err == nil {
 			t.Errorf("child %d still alive after Close", pid)
 		}
+	}
+}
+
+// spawnMarked wraps the child command so each spawn appends a line to the
+// returned file.
+func spawnMarked(t *testing.T, o *runner.Options) string {
+	mark := filepath.Join(t.TempDir(), "spawns")
+	o.Args = append([]string{"-c", `echo x >> "$SPAWN_MARK"; exec "$0" "$@"`, o.Command}, o.Args...)
+	o.Command = "/bin/sh"
+	o.Env = append(o.Env, "SPAWN_MARK="+mark)
+	return mark
+}
+
+func spawns(t *testing.T, mark string) int {
+	data, err := os.ReadFile(mark)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(data), "\n")
+}
+
+// Browsers always send Origin and the Dock never does, so any /mcp request
+// with one is refused before anything else, token or not (DNS rebinding).
+func TestOriginRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		token string
+		auth  string
+	}{
+		{"no token configured", "", ""},
+		{"valid bearer", "s3cret", "Bearer s3cret"},
+		{"wrong bearer", "s3cret", "Bearer wrong"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mark string
+			url, r, _ := start(t, func(o *runner.Options) {
+				o.BearerToken = tc.token
+				mark = spawnMarked(t, o)
+			})
+			hdr := map[string]string{"Origin": "http://evil.example"}
+			if tc.auth != "" {
+				hdr["Authorization"] = tc.auth
+			}
+			if resp := postWith(t, url, initBody, hdr); resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("initialize with Origin: status %d, want 403", resp.StatusCode)
+			}
+			for _, m := range []string{http.MethodGet, http.MethodDelete} {
+				h := map[string]string{"Mcp-Session-Id": "nope", "Origin": "null"}
+				if tc.auth != "" {
+					h["Authorization"] = tc.auth
+				}
+				if resp := do(t, m, url, h); resp.StatusCode != http.StatusForbidden {
+					t.Errorf("%s with Origin: status %d, want 403", m, resp.StatusCode)
+				}
+			}
+			if n := r.Sessions(); n != 0 {
+				t.Fatalf("Sessions() = %d after rejects, want 0", n)
+			}
+			if n := spawns(t, mark); n != 0 {
+				t.Fatalf("%d children spawned for rejected requests", n)
+			}
+
+			// Without Origin the same request works.
+			delete(hdr, "Origin")
+			if tc.auth == "Bearer wrong" {
+				hdr["Authorization"] = "Bearer s3cret"
+			}
+			if resp := postWith(t, url, initBody, hdr); resp.StatusCode != http.StatusOK {
+				t.Fatalf("initialize without Origin: status %d, want 200", resp.StatusCode)
+			}
+			if n := spawns(t, mark); n != 1 {
+				t.Fatalf("%d children spawned, want 1", n)
+			}
+			hz := do(t, http.MethodGet, strings.TrimSuffix(url, "/mcp")+"/healthz", map[string]string{"Origin": "http://evil.example"})
+			if hz.StatusCode != http.StatusOK {
+				t.Fatalf("/healthz with Origin: %d, want 200", hz.StatusCode)
+			}
+		})
 	}
 }

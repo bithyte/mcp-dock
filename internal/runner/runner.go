@@ -77,7 +77,8 @@ func New(opts Options) *Runner {
 	return &Runner{opts: opts, log: log, sessions: make(map[string]*session)}
 }
 
-// Handler serves /mcp and /healthz.
+// Handler serves /mcp and /healthz. Any /mcp request with an Origin header
+// gets 403, so browser-based clients can't use a runner directly.
 func (r *Runner) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", r.serveMCP)
@@ -147,6 +148,13 @@ func (r *Runner) authorized(w http.ResponseWriter, req *http.Request) bool {
 }
 
 func (r *Runner) serveMCP(w http.ResponseWriter, req *http.Request) {
+	// Browsers always send Origin on these requests and the Dock never does.
+	// Refusing it keeps a web page from driving the child through DNS
+	// rebinding when there's no token, so check it before the token.
+	if _, ok := req.Header["Origin"]; ok {
+		http.Error(w, "cross-origin requests are not allowed", http.StatusForbidden)
+		return
+	}
 	if !r.authorized(w, req) {
 		return
 	}

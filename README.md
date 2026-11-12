@@ -84,6 +84,8 @@ Flags go before the command. Each falls back to an env var, then to a default:
 
 `MCP_RUNNER_BEARER_TOKEN` (env only, no flag): if set, every `/mcp` request needs `Authorization: Bearer <token>`, else 401. If unset, the runner trusts anyone who can reach its port, so either set it or keep the runner on a network only the Dock can reach (preferably both). Pass it with `-e MCP_RUNNER_BEARER_TOKEN` (value from your shell) or an env file, never on the command line.
 
+Any `/mcp` request with an `Origin` header gets 403, checked before the token. Browsers always send `Origin` and the Dock never does, so this keeps a web page from reaching a runner through DNS rebinding, which matters most with no token on `127.0.0.1`. It also means browser-based clients (MCP Inspector in direct mode, for one) can't talk to a runner directly; go through the Dock.
+
 The child gets the runner's environment minus every `MCP_RUNNER_*` variable, so the token and runner settings never reach it. Put the upstream's own secrets in the runner container's env.
 
 ### Running a runner
