@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS auth_requests (
 	scope TEXT NOT NULL,
 	login TEXT NOT NULL,
 	github_id INTEGER NOT NULL,
-	expires_at INTEGER NOT NULL
+	expires_at INTEGER NOT NULL,
+	pending TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS codes (
 	hash TEXT PRIMARY KEY,
@@ -87,11 +88,31 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
+	if err := migratePendingColumn(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := migrateBareLogins(db); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+// migratePendingColumn adds auth_requests.pending to databases created before
+// it existed. Fresh databases already have it from the schema.
+func migratePendingColumn(db *sql.DB) error {
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('auth_requests') WHERE name='pending'`).Scan(&n); err != nil {
+		return fmt.Errorf("migrate pending column: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE auth_requests ADD COLUMN pending TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("migrate pending column: %w", err)
+	}
+	return nil
 }
 
 // migrateBareLogins rewrites logins stored before ids were provider

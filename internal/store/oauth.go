@@ -84,6 +84,49 @@ func (s *Store) SetAuthRequestUser(ctx context.Context, id, userID string, githu
 	return nil
 }
 
+// SetAuthRequestPending stores an opaque provider blob (it may hold a
+// continue token, so callers must never log it) on an unexpired auth request
+// that has no login yet, replacing any earlier blob. ErrNotFound if no row
+// matched.
+func (s *Store) SetAuthRequestPending(ctx context.Context, id, pending string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE auth_requests SET pending=? WHERE id=? AND login='' AND expires_at>?`,
+		pending, id, ts(time.Now()))
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ClaimAuthRequestPending atomically clears and returns the pending blob.
+// Only one caller can win; the rest get ErrNotFound. RETURNING reports the
+// post-update row, so a no-op UPDATE first takes the write lock and reads the
+// current blob, then the second UPDATE clears it, all in one transaction.
+func (s *Store) ClaimAuthRequestPending(ctx context.Context, id string, now time.Time) (string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var pending string
+	err = tx.QueryRowContext(ctx,
+		`UPDATE auth_requests SET pending=pending WHERE id=? AND pending<>'' AND login='' AND expires_at>? RETURNING pending`,
+		id, ts(now)).Scan(&pending)
+	if err != nil {
+		return "", notFound(err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE auth_requests SET pending='' WHERE id=?`, id); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return pending, nil
+}
+
 // ConsumeAuthRequest atomically deletes and returns an unexpired auth
 // request. Only one caller can win; the rest get ErrNotFound.
 func (s *Store) ConsumeAuthRequest(ctx context.Context, id string, now time.Time) (*AuthRequest, error) {

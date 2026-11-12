@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -351,4 +353,134 @@ func TestMigrateBareLogins(t *testing.T) {
 	}
 	check()
 	check() // idempotent
+}
+
+func saveReq(t *testing.T, s *Store, id string, exp time.Time) {
+	t.Helper()
+	if err := s.SaveAuthRequest(context.Background(), AuthRequest{ID: id, ClientID: "c", RedirectURI: "r", ExpiresAt: exp}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPendingClaimOnce(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	saveReq(t, s, "a", time.Now().Add(time.Hour))
+	if err := s.SetAuthRequestPending(ctx, "a", `{"x":1}`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ClaimAuthRequestPending(ctx, "a", time.Now())
+	if err != nil || got != `{"x":1}` {
+		t.Fatalf("claim = %q, %v", got, err)
+	}
+	if _, err := s.ClaimAuthRequestPending(ctx, "a", time.Now()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second claim err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPendingClaimConcurrent(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	saveReq(t, s, "a", time.Now().Add(time.Hour))
+	if err := s.SetAuthRequestPending(ctx, "a", "blob"); err != nil {
+		t.Fatal(err)
+	}
+	var wins atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if v, err := s.ClaimAuthRequestPending(ctx, "a", time.Now()); err == nil && v == "blob" {
+				wins.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if wins.Load() != 1 {
+		t.Fatalf("%d claims won, want 1", wins.Load())
+	}
+}
+
+func TestPendingOverwrite(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	saveReq(t, s, "a", time.Now().Add(time.Hour))
+	for _, v := range []string{"a", "b"} {
+		if err := s.SetAuthRequestPending(ctx, "a", v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := s.ClaimAuthRequestPending(ctx, "a", time.Now()); err != nil || got != "b" {
+		t.Fatalf("claim = %q, %v", got, err)
+	}
+}
+
+func TestPendingRejectedAfterLogin(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	saveReq(t, s, "a", time.Now().Add(time.Hour))
+	if err := s.SetAuthRequestPending(ctx, "a", "p"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAuthRequestUser(ctx, "a", "github:x", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAuthRequestPending(ctx, "a", "q"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("set after login err = %v, want ErrNotFound", err)
+	}
+	if _, err := s.ClaimAuthRequestPending(ctx, "a", time.Now()); !errors.Is(err, ErrNotFound) {
+		t.Errorf("claim after login err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPendingExpired(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	exp := time.Now().Add(time.Hour)
+	saveReq(t, s, "a", exp)
+	if err := s.SetAuthRequestPending(ctx, "a", "p"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimAuthRequestPending(ctx, "a", exp.Add(time.Second)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("claim after expiry err = %v, want ErrNotFound", err)
+	}
+	saveReq(t, s, "b", time.Now().Add(-time.Second))
+	if err := s.SetAuthRequestPending(ctx, "b", "p"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("set on expired err = %v, want ErrNotFound", err)
+	}
+	if err := s.SetAuthRequestPending(ctx, "missing", "p"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("set on missing err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPendingColumnMigration(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "old.db")
+	raw, err := sql.Open("sqlite", "file:"+p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`CREATE TABLE auth_requests (
+		id TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, client_state TEXT NOT NULL,
+		code_challenge TEXT NOT NULL, resource TEXT NOT NULL, scope TEXT NOT NULL, login TEXT NOT NULL,
+		github_id INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+		INSERT INTO auth_requests VALUES ('old','c','r','','','','','',0,` + strconv.FormatInt(time.Now().Add(time.Hour).UnixNano(), 10) + `)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+	for i := 0; i < 2; i++ { // second Open proves idempotence
+		s, err := Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := context.Background()
+		if err := s.SetAuthRequestPending(ctx, "old", "p"); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := s.ClaimAuthRequestPending(ctx, "old", time.Now()); err != nil || got != "p" {
+			t.Fatalf("claim = %q, %v", got, err)
+		}
+		s.Close()
+	}
 }
