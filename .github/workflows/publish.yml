@@ -82,6 +82,17 @@ jobs:
             echo "error: arm64 image reports '$got', expected '$VERSION'" >&2
             exit 1
           fi
+          # The run above proves nothing about GOARCH (a native amd64 binary
+          # runs fine), so inspect the binary's build info too.
+          tmp=$(mktemp -d)
+          id=$(docker create --platform linux/arm64 mcp-dock:test-arm64)
+          docker cp "$id:/usr/local/bin/mcp-dock" "$tmp/mcp-dock"
+          docker rm "$id" >/dev/null
+          if ! go version -m "$tmp/mcp-dock" | grep -qx $'\tbuild\tGOARCH=arm64'; then
+            echo "error: arm64 image binary is not GOARCH=arm64" >&2
+            go version -m "$tmp/mcp-dock" >&2 || true
+            exit 1
+          fi
 
       - name: Push multi-arch image
         run: |
