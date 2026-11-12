@@ -72,8 +72,8 @@ func newTestServerLog(t *testing.T, logOut io.Writer) (*Server, *httptest.Server
 	cfg := &config.Config{
 		PublicURL:    ts.URL,
 		DataDir:      t.TempDir(),
-		GitHub:       config.GitHubConfig{ClientID: testGitHubClientID, ClientSecret: testGitHubClientSecret},
-		AllowedUsers: []string{"cozmin"},
+		Providers:    config.ProvidersConfig{GitHub: &config.GitHubConfig{ClientID: testGitHubClientID, ClientSecret: testGitHubClientSecret}},
+		AllowedUsers: config.AllowedUsers{GitHub: []string{"cozmin"}},
 	}
 	srv := New(Options{
 		Config: cfg,

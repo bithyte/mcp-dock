@@ -103,8 +103,8 @@ func newEnv(t *testing.T, extra ...config.UpstreamConfig) *env {
 	e.cfg = &config.Config{
 		PublicURL:    publicURL,
 		DataDir:      t.TempDir(),
-		GitHub:       config.GitHubConfig{ClientID: ghClientID, ClientSecret: ghClientSecret},
-		AllowedUsers: []string{"cozmin", "friend"},
+		Providers:    config.ProvidersConfig{GitHub: &config.GitHubConfig{ClientID: ghClientID, ClientSecret: ghClientSecret}},
+		AllowedUsers: config.AllowedUsers{GitHub: []string{"cozmin", "friend"}},
 		Upstreams: append([]config.UpstreamConfig{{
 			Name:     "fake",
 			Command:  bin,
@@ -479,7 +479,7 @@ func TestEndToEndRemovedUser(t *testing.T) {
 	waitTools(t, cs, "fake__echo")
 	call(t, cs, "fake__echo", map[string]any{"text": "before"})
 
-	e.cfg.AllowedUsers = []string{"friend"}
+	e.cfg.AllowedUsers.GitHub = []string{"friend"}
 
 	req, _ := http.NewRequest(http.MethodPost, e.cfg.ResourceURL(), strings.NewReader(
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`))

@@ -167,6 +167,10 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		Scope:         q.Get("scope"),
 		ExpiresAt:     s.now().Add(authRequestTTL),
 	}
+	if s.gh == nil {
+		s.serverError(w, "no login provider", errors.New("github login is not configured"))
+		return
+	}
 	if err := s.store.SaveAuthRequest(r.Context(), ar); err != nil {
 		s.log.Error("oauth authorize: save request failed", "err", err)
 		s.errorPage(w, http.StatusInternalServerError, "Server error", "Something went wrong. Try again.")

@@ -24,7 +24,7 @@ const maxBodyBytes = 64 << 10
 type Options struct {
 	Config *config.Config
 	Store  *store.Store
-	GitHub *github.Client
+	GitHub *github.Client // nil when GitHub login is not configured
 	Logger *slog.Logger
 	Now    func() time.Time // default time.Now
 }
@@ -66,7 +66,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("OPTIONS /register", reg)
 
 	mux.Handle("GET /authorize", http.HandlerFunc(s.handleAuthorize))
-	mux.Handle("GET "+callbackPath, http.HandlerFunc(s.handleGitHubCallback))
+	if s.gh != nil {
+		mux.Handle("GET "+callbackPath, http.HandlerFunc(s.handleGitHubCallback))
+	}
 	mux.Handle("POST "+consentPath, limitBody(http.HandlerFunc(s.handleConsent)))
 	tok := cors(limitBody(http.HandlerFunc(s.handleToken)))
 	mux.Handle("POST /token", tok)

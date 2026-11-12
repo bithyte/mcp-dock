@@ -487,7 +487,7 @@ func TestTokenAllowlistAtExchange(t *testing.T) {
 	srv, ts, fake, _ := newTokenServer(t)
 	id := registerClient(t, ts, claudeRedirect)
 	code := obtainCode(t, ts, fake, id, claudeRedirect, nil)
-	srv.cfg.AllowedUsers = []string{}
+	srv.cfg.AllowedUsers.GitHub = []string{}
 	wantError(t, postToken(t, ts, codeForm(id, code, claudeRedirect)), http.StatusBadRequest, "invalid_grant")
 }
 
@@ -682,7 +682,7 @@ func TestRefreshExpiry(t *testing.T) {
 func TestRemovedFromAllowlist(t *testing.T) {
 	srv, ts, fake, _ := newTokenServer(t)
 	id, r := exchange(t, ts, fake)
-	srv.cfg.AllowedUsers = []string{}
+	srv.cfg.AllowedUsers.GitHub = []string{}
 	if _, err := srv.Verify(context.Background(), r.str("access_token"), nil); !errors.Is(err, auth.ErrInvalidToken) {
 		t.Fatalf("verify: %v", err)
 	}

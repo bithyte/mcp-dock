@@ -71,16 +71,20 @@ func Build(cfg *config.Config, getenv func(string) string, log *slog.Logger, st 
 	gw.Sync()
 	a.Gateway = gw
 
-	a.OAuth = oauth.New(oauth.Options{
-		Config: cfg,
-		Store:  st,
-		GitHub: &github.Client{
-			ClientID:     cfg.GitHub.ClientID,
-			ClientSecret: cfg.GitHub.ClientSecret,
+	var gh *github.Client
+	if g := cfg.Providers.GitHub; g != nil {
+		gh = &github.Client{
+			ClientID:     g.ClientID,
+			ClientSecret: g.ClientSecret,
 			WebBaseURL:   opts.GitHubWebBaseURL,
 			APIBaseURL:   opts.GitHubAPIBaseURL,
 			HTTP:         opts.GitHubHTTP,
-		},
+		}
+	}
+	a.OAuth = oauth.New(oauth.Options{
+		Config: cfg,
+		Store:  st,
+		GitHub: gh,
 		Logger: log,
 		Now:    opts.Now,
 	})

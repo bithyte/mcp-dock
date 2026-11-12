@@ -65,10 +65,12 @@ func writeConfig(t *testing.T, listen, extra string) (path, dataDir string) {
 	cfg := fmt.Sprintf(`public_url: http://%s
 listen: %q
 data_dir: %s
-github:
-  client_id: cid
-  client_secret_env: GH_SECRET
-allowed_users: [cozmin]
+providers:
+  github:
+    client_id: cid
+    client_secret_env: GH_SECRET
+allowed_users:
+  github: [cozmin]
 %s`, host, listen, dataDir, extra)
 	path = filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {

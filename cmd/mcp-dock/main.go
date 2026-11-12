@@ -179,7 +179,8 @@ func serve(ctx context.Context, cfg *config.Config, getenv func(string) string, 
 	wg.Go(func() { cleanupLoop(upCtx, st, log) })
 
 	log.Info("mcp-dock listening", "addr", ln.Addr().String(), "public_url", cfg.PublicURL,
-		"version", version, "upstreams", names, "allowed_users", len(cfg.AllowedUsers))
+		"version", version, "upstreams", names, "allowed_github", len(cfg.AllowedUsers.GitHub),
+		"allowed_open_payments", len(cfg.AllowedUsers.OpenPayments))
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()

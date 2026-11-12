@@ -38,8 +38,8 @@ func newFixture(t *testing.T) *fixture {
 	cfg := &config.Config{
 		PublicURL:    testPublicURL,
 		DataDir:      t.TempDir(),
-		GitHub:       config.GitHubConfig{ClientID: "cid", ClientSecret: "secret"},
-		AllowedUsers: []string{"cozmin"},
+		Providers:    config.ProvidersConfig{GitHub: &config.GitHubConfig{ClientID: "cid", ClientSecret: "secret"}},
+		AllowedUsers: config.AllowedUsers{GitHub: []string{"cozmin"}},
 	}
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	osrv := oauth.New(oauth.Options{
