@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Base refs are pinned to the multi-arch index digest, resolved 2026-11-12.
 
 # golang:1.27.2-trixie
@@ -28,6 +27,7 @@ COPY --from=build /out/mcp-dock /usr/local/bin/mcp-dock
 COPY image/npmrc /usr/local/etc/npmrc
 COPY image/uv.toml /etc/uv/uv.toml
 ENV MCP_DOCK_CONFIG=/etc/mcp-dock/config.yaml HOME=/data/home
+RUN install -d -o 65532 -g 65532 -m 0700 /data
 USER 65532:65532
 ENTRYPOINT ["mcp-dock"]
 CMD ["serve"]
