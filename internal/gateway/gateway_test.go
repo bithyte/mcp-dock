@@ -626,14 +626,14 @@ func TestAuditLog(t *testing.T) {
 	h := g.handler(ot, "echo", "other__echo")
 	req := &mcp.CallToolRequest{
 		Params: &mcp.CallToolParamsRaw{Name: "other__echo", Arguments: json.RawMessage(`{"msg":"supersecretvalue"}`)},
-		Extra:  &mcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: "cozmin"}},
+		Extra:  &mcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: "alice"}},
 	}
 	res, err := h(context.Background(), req)
 	if err != nil || res.IsError {
 		t.Fatalf("handler: %v %+v", err, res)
 	}
 	rec := findCallRecord(t, buf.String())
-	if rec["user"] != "cozmin" || rec["tool"] != "other__echo" || rec["ok"] != true {
+	if rec["user"] != "alice" || rec["tool"] != "other__echo" || rec["ok"] != true {
 		t.Fatalf("record = %v", rec)
 	}
 	if _, ok := rec["duration_ms"].(float64); !ok {

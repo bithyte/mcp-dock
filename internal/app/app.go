@@ -17,6 +17,7 @@ import (
 	"github.com/bithyte/mcp-dock/internal/github"
 	"github.com/bithyte/mcp-dock/internal/httpserver"
 	"github.com/bithyte/mcp-dock/internal/oauth"
+	"github.com/bithyte/mcp-dock/internal/oplogin"
 	"github.com/bithyte/mcp-dock/internal/store"
 	"github.com/bithyte/mcp-dock/internal/upstream"
 )
@@ -29,6 +30,7 @@ type Options struct {
 	GitHubWebBaseURL string       // default https://github.com
 	GitHubAPIBaseURL string       // default https://api.github.com
 	GitHubHTTP       *http.Client // default: the github package's client
+	OpenPaymentsHTTP *http.Client // default: the oplogin package's client
 	MinBackoff       time.Duration
 	MaxBackoff       time.Duration
 	Now              func() time.Time // oauth clock, default time.Now
@@ -44,8 +46,24 @@ type App struct {
 
 // Build wires everything from cfg. Upstream processes get only the env
 // Environ builds from getenv, and an empty working dir under cfg.DataDir.
-// Nothing runs until RunUpstreams.
-func Build(cfg *config.Config, getenv func(string) string, log *slog.Logger, st *store.Store, opts Options) *App {
+// Nothing runs until RunUpstreams. It fails if the Open Payments client
+// can't be built from the config.
+func Build(cfg *config.Config, getenv func(string) string, log *slog.Logger, st *store.Store, opts Options) (*App, error) {
+	var op *oplogin.Client
+	if c := cfg.Providers.OpenPayments; c != nil {
+		var err error
+		op, err = oplogin.New(oplogin.Config{
+			WalletAddress: c.WalletAddress,
+			KeyID:         c.KeyID,
+			PrivateKey:    c.PrivateKey,
+			HTTP:          opts.OpenPaymentsHTTP,
+			Logger:        log,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	a := &App{}
 	var gw *gateway.Gateway
 	backends := make([]gateway.Backend, 0, len(cfg.Upstreams))
@@ -71,21 +89,26 @@ func Build(cfg *config.Config, getenv func(string) string, log *slog.Logger, st 
 	gw.Sync()
 	a.Gateway = gw
 
-	a.OAuth = oauth.New(oauth.Options{
-		Config: cfg,
-		Store:  st,
-		GitHub: &github.Client{
-			ClientID:     cfg.GitHub.ClientID,
-			ClientSecret: cfg.GitHub.ClientSecret,
+	var gh *github.Client
+	if g := cfg.Providers.GitHub; g != nil {
+		gh = &github.Client{
+			ClientID:     g.ClientID,
+			ClientSecret: g.ClientSecret,
 			WebBaseURL:   opts.GitHubWebBaseURL,
 			APIBaseURL:   opts.GitHubAPIBaseURL,
 			HTTP:         opts.GitHubHTTP,
-		},
-		Logger: log,
-		Now:    opts.Now,
+		}
+	}
+	a.OAuth = oauth.New(oauth.Options{
+		Config:       cfg,
+		Store:        st,
+		GitHub:       gh,
+		OpenPayments: op,
+		Logger:       log,
+		Now:          opts.Now,
 	})
 	a.Handler = httpserver.NewHandler(a.OAuth, gw)
-	return a
+	return a, nil
 }
 
 // RunUpstreams runs every upstream supervisor until ctx is done, then

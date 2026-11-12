@@ -38,14 +38,14 @@ func (c *testClock) Advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// newTokenServer is newTestServer with a fake clock and "cozmin" (id 1)
+// newTokenServer is newTestServer with a fake clock and "alice" (id 1)
 // as the GitHub user.
 func newTokenServer(t *testing.T) (*Server, *httptest.Server, *testutil.FakeGitHub, *testClock) {
 	t.Helper()
 	srv, ts, fake := newTestServer(t)
 	clk := &testClock{t: time.Now()}
 	srv.now = clk.Now
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	return srv, ts, fake, clk
 }
 
@@ -202,7 +202,7 @@ func TestTokenExchange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.UserID != "cozmin" || info.Scopes != nil {
+	if info.UserID != "github:alice" || info.Scopes != nil {
 		t.Errorf("info %+v", info)
 	}
 	if d := info.Expiration.Sub(clk.Now()); d != time.Hour {
@@ -487,7 +487,7 @@ func TestTokenAllowlistAtExchange(t *testing.T) {
 	srv, ts, fake, _ := newTokenServer(t)
 	id := registerClient(t, ts, claudeRedirect)
 	code := obtainCode(t, ts, fake, id, claudeRedirect, nil)
-	srv.cfg.AllowedUsers = []string{}
+	srv.cfg.AllowedUsers.GitHub = []string{}
 	wantError(t, postToken(t, ts, codeForm(id, code, claudeRedirect)), http.StatusBadRequest, "invalid_grant")
 }
 
@@ -598,7 +598,7 @@ func TestRefreshRotates(t *testing.T) {
 		t.Errorf("headers %v", r2.Header)
 	}
 	info, err := srv.Verify(context.Background(), r2.str("access_token"), nil)
-	if err != nil || info.UserID != "cozmin" {
+	if err != nil || info.UserID != "github:alice" {
 		t.Fatalf("new access: %+v %v", info, err)
 	}
 	// Reusing the rotated refresh token fails.
@@ -682,7 +682,7 @@ func TestRefreshExpiry(t *testing.T) {
 func TestRemovedFromAllowlist(t *testing.T) {
 	srv, ts, fake, _ := newTokenServer(t)
 	id, r := exchange(t, ts, fake)
-	srv.cfg.AllowedUsers = []string{}
+	srv.cfg.AllowedUsers.GitHub = []string{}
 	if _, err := srv.Verify(context.Background(), r.str("access_token"), nil); !errors.Is(err, auth.ErrInvalidToken) {
 		t.Fatalf("verify: %v", err)
 	}
@@ -710,7 +710,7 @@ func TestVerifyWrongResource(t *testing.T) {
 	srv, _, _, clk := newTokenServer(t)
 	tok := newSecret()
 	err := srv.store.SaveToken(context.Background(), store.Token{
-		Hash: hashSecret(tok), Kind: "access", ClientID: "c", Login: "cozmin",
+		Hash: hashSecret(tok), Kind: "access", ClientID: "c", Login: "github:alice",
 		Resource: "https://other.example/mcp", ExpiresAt: clk.Now().Add(time.Hour),
 	})
 	if err != nil {
@@ -730,7 +730,7 @@ func TestTokenNoSecretsLogged(t *testing.T) {
 	srv, ts, fake, logs := newTestServerLogs(t)
 	clk := &testClock{t: time.Now()}
 	srv.now = clk.Now
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	id, secret := registerConfidential(t, ts, "client_secret_post", claudeRedirect)
 	code := obtainCode(t, ts, fake, id, claudeRedirect, nil)
 	f := codeForm(id, code, claudeRedirect)
@@ -747,5 +747,18 @@ func TestTokenNoSecretsLogged(t *testing.T) {
 		if strings.Contains(out, s) {
 			t.Fatalf("log contains secret %q: %s", s, out)
 		}
+	}
+}
+
+func TestCallbackStoresPrefixedUser(t *testing.T) {
+	srv, ts, fake, _ := newTokenServer(t)
+	fake.SetUser("Alice", 1)
+	_, r := exchange(t, ts, fake)
+	info, err := srv.Verify(context.Background(), r.str("access_token"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.UserID != "github:alice" {
+		t.Errorf("UserID %q, want github:alice", info.UserID)
 	}
 }

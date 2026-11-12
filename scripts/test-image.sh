@@ -91,10 +91,12 @@ cat >"$CONF/config.yaml" <<YAML
 public_url: http://localhost:8080
 listen: ":8080"
 data_dir: /data
-github:
-  client_id: test
-  client_secret_env: GITHUB_CLIENT_SECRET
-allowed_users: [test]
+providers:
+  github:
+    client_id: test
+    client_secret_env: GITHUB_CLIENT_SECRET
+allowed_users:
+  github: [test]
 upstreams:
   - name: npm
     command: npx

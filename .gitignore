@@ -1,3 +1,4 @@
 /mcp-dock
 *.db
 /data/
+private.key

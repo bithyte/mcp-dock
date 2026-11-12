@@ -2,7 +2,7 @@
 // stdio MCP servers.
 //
 //	mcp-dock serve [-config path]
-//	mcp-dock users reset [-config path] <login>
+//	mcp-dock users reset [-config path] <login | wallet address>
 //	mcp-dock version
 //
 // The config path defaults to $MCP_DOCK_CONFIG, else ./config.yaml.
@@ -20,13 +20,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/bithyte/mcp-dock/internal/app"
 	"github.com/bithyte/mcp-dock/internal/config"
+	"github.com/bithyte/mcp-dock/internal/identity"
 	"github.com/bithyte/mcp-dock/internal/store"
 )
 
@@ -42,7 +42,7 @@ const (
 
 const usage = `usage:
   mcp-dock serve [-config path]
-  mcp-dock users reset [-config path] <login>
+  mcp-dock users reset [-config path] <login | wallet address>
   mcp-dock version
 config path defaults to $MCP_DOCK_CONFIG, else ./config.yaml`
 
@@ -97,7 +97,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout 
 			return err
 		}
 		if len(rest) != 1 || rest[0] == "" {
-			return usageError("users reset takes exactly one login")
+			return usageError("users reset takes exactly one user")
 		}
 		cfg, err := config.Load(cfgPath, getenv)
 		if err != nil {
@@ -137,16 +137,24 @@ func openStore(cfg *config.Config) (*store.Store, error) {
 	return store.Open(filepath.Join(cfg.DataDir, "gateway.db"))
 }
 
-func resetUser(ctx context.Context, cfg *config.Config, login string, stdout io.Writer) error {
+func resetUser(ctx context.Context, cfg *config.Config, arg string, stdout io.Writer) error {
+	uid, err := identity.ParseCLIUser(arg)
+	if err != nil {
+		return usageError("users reset: %v", err)
+	}
 	st, err := openStore(cfg)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	if err := st.ResetUser(ctx, login); err != nil {
+	if err := st.ResetUser(ctx, uid); err != nil {
 		return fmt.Errorf("reset user: %w", err)
 	}
-	fmt.Fprintf(stdout, "reset %s: cleared stored GitHub ID, consents and tokens\n", strings.ToLower(login))
+	msg := "reset " + uid + ": cleared consents and tokens"
+	if p, _, _ := identity.Split(uid); p == identity.GitHub {
+		msg += " and stored GitHub ID"
+	}
+	fmt.Fprintln(stdout, msg)
 	return nil
 }
 
@@ -159,12 +167,15 @@ func serve(ctx context.Context, cfg *config.Config, getenv func(string) string, 
 	}
 	defer st.Close()
 
+	a, err := app.Build(cfg, getenv, log, st, app.Options{Version: version})
+	if err != nil {
+		return err
+	}
+
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-
-	a := app.Build(cfg, getenv, log, st, app.Options{Version: version})
 	names := make([]string, 0, len(cfg.Upstreams))
 	for _, uc := range cfg.Upstreams {
 		names = append(names, uc.Name)
@@ -179,7 +190,8 @@ func serve(ctx context.Context, cfg *config.Config, getenv func(string) string, 
 	wg.Go(func() { cleanupLoop(upCtx, st, log) })
 
 	log.Info("mcp-dock listening", "addr", ln.Addr().String(), "public_url", cfg.PublicURL,
-		"version", version, "upstreams", names, "allowed_users", len(cfg.AllowedUsers))
+		"version", version, "upstreams", names, "allowed_github", len(cfg.AllowedUsers.GitHub),
+		"allowed_open_payments", len(cfg.AllowedUsers.OpenPayments))
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()

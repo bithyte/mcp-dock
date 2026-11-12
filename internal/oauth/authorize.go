@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bithyte/mcp-dock/internal/config"
+	"github.com/bithyte/mcp-dock/internal/identity"
 	"github.com/bithyte/mcp-dock/internal/store"
 	"golang.org/x/net/idna"
 )
@@ -22,8 +23,11 @@ const (
 
 	// consentPath is under authCookiePath so the browser sends the cookie
 	// with the consent POST. Plain /consent wouldn't get it.
-	consentPath  = "/oauth/consent"
-	callbackPath = "/oauth/github/callback"
+	consentPath     = "/oauth/consent"
+	callbackPath    = "/oauth/github/callback"
+	githubStartPath = "/oauth/github/start"
+	opStartPath     = "/oauth/open-payments/start"
+	opCallbackPath  = "/oauth/open-payments/callback"
 
 	maxStateLen = 2048
 	maxScopeLen = 1024
@@ -91,7 +95,8 @@ func validChallenge(c string) bool {
 
 // handleAuthorize starts an authorization: it validates the client and
 // redirect URI, saves an AuthRequest, binds it to this browser with a
-// cookie, and sends the user to GitHub.
+// cookie, and shows the sign-in page. With GitHub as the only provider it
+// skips the page and sends the user straight to GitHub.
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -166,13 +171,21 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		Scope:         q.Get("scope"),
 		ExpiresAt:     s.now().Add(authRequestTTL),
 	}
+	if s.gh == nil && s.op == nil {
+		s.serverError(w, "no login provider", errors.New("no login provider is configured"))
+		return
+	}
 	if err := s.store.SaveAuthRequest(r.Context(), ar); err != nil {
 		s.log.Error("oauth authorize: save request failed", "err", err)
 		s.errorPage(w, http.StatusInternalServerError, "Server error", "Something went wrong. Try again.")
 		return
 	}
 	s.setAuthCookie(w, ar.ID, int(authRequestTTL/time.Second))
-	s.redirect(w, s.gh.AuthorizeURL(ar.ID, s.cfg.PublicURL+callbackPath))
+	if s.op == nil {
+		s.redirect(w, s.gh.AuthorizeURL(ar.ID, s.cfg.PublicURL+callbackPath))
+		return
+	}
+	s.signin(w, http.StatusOK, client.Name, ar.ID, "", "")
 }
 
 // handleGitHubCallback finishes the GitHub login. The state must name an
@@ -217,13 +230,14 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.cfg.IsAllowed(user.Login) {
-		s.log.Warn("github login not on allowlist", "login", user.Login)
+	uid := identity.GitHubUser(user.Login)
+	if !s.cfg.IsAllowed(uid) {
+		s.log.Warn("github login not on allowlist", "user", uid)
 		s.abandon(w, r, ar)
-		s.notAllowed(w, user.Login)
+		s.notAllowed(w, uid)
 		return
 	}
-	pinned, known, err := s.store.GitHubID(r.Context(), user.Login)
+	pinned, known, err := s.store.GitHubID(r.Context(), uid)
 	if err != nil {
 		s.serverError(w, "github id lookup failed", err)
 		return
@@ -231,24 +245,39 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	if known && pinned != user.ID {
 		// Same login, different account: GitHub logins can be renamed and
 		// re-registered. Deny until an admin runs `mcp-dock users reset`.
-		s.log.Warn("github id mismatch for known login", "login", user.Login, "stored_github_id", pinned, "github_id", user.ID)
+		s.log.Warn("github id mismatch for known login", "user", uid, "stored_github_id", pinned, "github_id", user.ID)
 		s.abandon(w, r, ar)
-		s.notAllowed(w, user.Login)
+		s.notAllowed(w, uid)
 		return
 	}
 	if !known {
-		if err := s.store.SetGitHubID(r.Context(), user.Login, user.ID); err != nil {
+		if err := s.store.SetGitHubID(r.Context(), uid, user.ID); err != nil {
 			s.serverError(w, "github id save failed", err)
 			return
 		}
 	}
-	if err := s.store.SetAuthRequestUser(r.Context(), ar.ID, user.Login, user.ID); err != nil {
+	s.afterLogin(w, r, ar, uid, user.Login, user.ID)
+}
+
+// afterLogin is the provider-neutral tail of a successful, allowed login:
+// it binds the user to the auth request, then either issues a code (consent
+// already given) or renders the consent page. displayName is what the
+// consent page shows (GitHub keeps the login's original casing). githubID is
+// stored on the auth request (0 for providers without one).
+func (s *Server) afterLogin(w http.ResponseWriter, r *http.Request, ar *store.AuthRequest, userID, displayName string, githubID int64) {
+	err := s.store.SetAuthRequestUser(r.Context(), ar.ID, userID, githubID)
+	if errors.Is(err, store.ErrNotFound) {
+		// Gone, or another login on this request got there first.
+		s.badLink(w)
+		return
+	}
+	if err != nil {
 		s.serverError(w, "auth request update failed", err)
 		return
 	}
-	ar.Login, ar.GitHubID = strings.ToLower(user.Login), user.ID
+	ar.Login, ar.GitHubID = userID, githubID
 
-	consented, err := s.store.HasConsent(r.Context(), ar.Login, ar.ClientID, consentKey(ar.RedirectURI))
+	consented, err := s.store.HasConsent(r.Context(), userID, ar.ClientID, consentKey(ar.RedirectURI))
 	if err != nil {
 		s.serverError(w, "consent lookup failed", err)
 		return
@@ -262,14 +291,16 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, "client lookup failed", err)
 		return
 	}
-	name := client.Name
-	if name == "" {
-		name = "Unnamed app"
+	clientName := client.Name
+	if clientName == "" {
+		clientName = "Unnamed app"
 	}
+	provider, _, _ := identity.Split(userID)
 	s.writeHTML(w, http.StatusOK, consentTmpl, consentData{
-		ClientName: name,
+		ClientName: clientName,
 		Redirect:   redirectDisplay(ar.RedirectURI),
-		Login:      user.Login,
+		Provider:   identity.Label(provider),
+		Name:       displayName,
 		RequestID:  ar.ID,
 	})
 }
@@ -403,8 +434,8 @@ func (s *Server) badLink(w http.ResponseWriter) {
 
 // notAllowed is the only 403 page. Allowlist misses and GitHub ID
 // mismatches look the same; the reason is in the server log.
-func (s *Server) notAllowed(w http.ResponseWriter, login string) {
-	s.errorPage(w, http.StatusForbidden, "Access denied", "GitHub account "+login+" isn't allowed on this gateway.")
+func (s *Server) notAllowed(w http.ResponseWriter, userID string) {
+	s.errorPage(w, http.StatusForbidden, "Access denied", identity.Describe(userID)+" isn't allowed on this gateway.")
 }
 
 func (s *Server) serverError(w http.ResponseWriter, what string, err error) {

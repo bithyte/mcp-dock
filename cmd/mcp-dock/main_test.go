@@ -65,10 +65,12 @@ func writeConfig(t *testing.T, listen, extra string) (path, dataDir string) {
 	cfg := fmt.Sprintf(`public_url: http://%s
 listen: %q
 data_dir: %s
-github:
-  client_id: cid
-  client_secret_env: GH_SECRET
-allowed_users: [cozmin]
+providers:
+  github:
+    client_id: cid
+    client_secret_env: GH_SECRET
+allowed_users:
+  github: [alice]
 %s`, host, listen, dataDir, extra)
 	path = filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
@@ -82,30 +84,56 @@ func TestUsersReset(t *testing.T) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(filepath.Join(dataDir, "gateway.db"))
+	dbPath := filepath.Join(dataDir, "gateway.db")
+	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetGitHubID(context.Background(), "cozmin", 42); err != nil {
+	if err := st.SetGitHubID(context.Background(), "github:alice", 42); err != nil {
+		t.Fatal(err)
+	}
+	const wallet = "open_payments:https://w.example/Al"
+	if err := st.SaveConsent(context.Background(), wallet, "c", "https://a.example/cb"); err != nil {
 		t.Fatal(err)
 	}
 	st.Close()
 
 	var out bytes.Buffer
-	if err := run(context.Background(), []string{"users", "reset", "-config", p, "Cozmin"}, testGetenv, &out); err != nil {
+	if err := run(context.Background(), []string{"users", "reset", "-config", p, "Alice"}, testGetenv, &out); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !strings.Contains(out.String(), "cozmin") {
-		t.Errorf("stdout %q, want a confirmation naming cozmin", out.String())
+	if !strings.Contains(out.String(), "github:alice") {
+		t.Errorf("stdout %q, want a confirmation naming github:alice", out.String())
 	}
 
-	st, err = store.Open(filepath.Join(dataDir, "gateway.db"))
+	st, err = store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.GitHubID(context.Background(), "github:alice"); err != nil || ok {
+		t.Fatalf("GitHubID after reset: ok=%v err=%v, want cleared", ok, err)
+	}
+	st.Close()
+
+	out.Reset()
+	if err := run(context.Background(), []string{"users", "reset", "-config", p, "$w.example/Al"}, testGetenv, &out); err != nil {
+		t.Fatalf("run wallet: %v", err)
+	}
+	if !strings.Contains(out.String(), wallet) {
+		t.Errorf("stdout %q, want a confirmation naming %s", out.String(), wallet)
+	}
+	st, err = store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if _, ok, err := st.GitHubID(context.Background(), "cozmin"); err != nil || ok {
-		t.Fatalf("GitHubID after reset: ok=%v err=%v, want cleared", ok, err)
+	if has, _ := st.HasConsent(context.Background(), wallet, "c", "https://a.example/cb"); has {
+		t.Error("wallet consent not cleared")
+	}
+
+	err = run(context.Background(), []string{"users", "reset", "-config", p, "http://x"}, testGetenv, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Errorf("http://x: err %v, want a usage error", err)
 	}
 }
 

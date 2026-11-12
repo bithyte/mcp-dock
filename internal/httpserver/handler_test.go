@@ -38,8 +38,8 @@ func newFixture(t *testing.T) *fixture {
 	cfg := &config.Config{
 		PublicURL:    testPublicURL,
 		DataDir:      t.TempDir(),
-		GitHub:       config.GitHubConfig{ClientID: "cid", ClientSecret: "secret"},
-		AllowedUsers: []string{"cozmin"},
+		Providers:    config.ProvidersConfig{GitHub: &config.GitHubConfig{ClientID: "cid", ClientSecret: "secret"}},
+		AllowedUsers: config.AllowedUsers{GitHub: []string{"alice"}},
 	}
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	osrv := oauth.New(oauth.Options{
@@ -126,7 +126,7 @@ func TestMCPInvalidToken(t *testing.T) {
 func TestMCPValidToken(t *testing.T) {
 	f := newFixture(t)
 	rec := httptest.NewRecorder()
-	f.h.ServeHTTP(rec, mcpRequest(f.token(t, "cozmin")))
+	f.h.ServeHTTP(rec, mcpRequest(f.token(t, "github:alice")))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -142,7 +142,7 @@ func TestMCPHostCheck(t *testing.T) {
 	f := newFixture(t)
 	ts := httptest.NewServer(f.h)
 	t.Cleanup(ts.Close)
-	tok := f.token(t, "cozmin")
+	tok := f.token(t, "github:alice")
 
 	for _, tc := range []struct {
 		host, origin string
