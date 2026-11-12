@@ -70,7 +70,7 @@ providers:
     client_id: cid
     client_secret_env: GH_SECRET
 allowed_users:
-  github: [cozmin]
+  github: [alice]
 %s`, host, listen, dataDir, extra)
 	path = filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
@@ -89,7 +89,7 @@ func TestUsersReset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetGitHubID(context.Background(), "github:cozmin", 42); err != nil {
+	if err := st.SetGitHubID(context.Background(), "github:alice", 42); err != nil {
 		t.Fatal(err)
 	}
 	const wallet = "open_payments:https://w.example/Al"
@@ -99,18 +99,18 @@ func TestUsersReset(t *testing.T) {
 	st.Close()
 
 	var out bytes.Buffer
-	if err := run(context.Background(), []string{"users", "reset", "-config", p, "Cozmin"}, testGetenv, &out); err != nil {
+	if err := run(context.Background(), []string{"users", "reset", "-config", p, "Alice"}, testGetenv, &out); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !strings.Contains(out.String(), "github:cozmin") {
-		t.Errorf("stdout %q, want a confirmation naming github:cozmin", out.String())
+	if !strings.Contains(out.String(), "github:alice") {
+		t.Errorf("stdout %q, want a confirmation naming github:alice", out.String())
 	}
 
 	st, err = store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := st.GitHubID(context.Background(), "github:cozmin"); err != nil || ok {
+	if _, ok, err := st.GitHubID(context.Background(), "github:alice"); err != nil || ok {
 		t.Fatalf("GitHubID after reset: ok=%v err=%v, want cleared", ok, err)
 	}
 	st.Close()

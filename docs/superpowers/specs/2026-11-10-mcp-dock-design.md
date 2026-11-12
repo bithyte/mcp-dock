@@ -48,7 +48,7 @@ First upstream integration: jaypost (https://bithyte.github.io/jaypost/, repo ht
 
 ### Deployment shape
 
-- Public URL is configured (e.g. `https://mcp.cozminu.com`; owner's domain is `cozminu.com`, exact subdomain not decided). It's used for OAuth metadata, issuer, and redirect URLs. Don't derive it from request headers.
+- Public URL is configured (e.g. `https://mcp.example.com`; owner's domain is `cozminu.com`, exact subdomain not decided). It's used for OAuth metadata, issuer, and redirect URLs. Don't derive it from request headers.
 - Listen address configurable (e.g. `:8080`), plain HTTP.
 - Later, gateway and jaypost will be containerized together on Podman. Keep that easy: config path and data dir via flags/env, logs to stdout, no assumptions about home directory layout.
 
@@ -97,7 +97,7 @@ Small local persistent store (SQLite or similar, builder's choice) in a configur
 One YAML file, edited by the admin. Secrets come from env vars, never the file. Rough shape (field names are the builder's call):
 
 ```yaml
-public_url: https://mcp.cozminu.com
+public_url: https://mcp.example.com
 listen: ":8080"
 data_dir: /var/lib/mcp-dock
 
@@ -106,7 +106,7 @@ github:
   client_secret_env: GITHUB_CLIENT_SECRET
 
 allowed_users:
-  - cozmin-github-login
+  - alice-github-login
   - friend-login
 
 upstreams:

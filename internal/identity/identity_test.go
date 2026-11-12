@@ -4,13 +4,13 @@ import "testing"
 
 func TestNormalizeWalletAddress(t *testing.T) {
 	ok := map[string]string{
-		"$ilp.interledger-test.dev/cozmin":           "https://ilp.interledger-test.dev/cozmin",
-		"  https://ILP.Interledger-Test.dev/Cozmin ": "https://ilp.interledger-test.dev/Cozmin",
-		"https://ilp.interledger-test.dev:443/a":     "https://ilp.interledger-test.dev/a",
-		"https://w.example/a/":                       "https://w.example/a",
-		"$w.example":                                 "https://w.example/.well-known/pay",
-		"https://w.example/":                         "https://w.example/.well-known/pay",
-		"https://127.0.0.1:8443/alice":               "https://127.0.0.1:8443/alice",
+		"$ilp.interledger-test.dev/alice":           "https://ilp.interledger-test.dev/alice",
+		"  https://ILP.Interledger-Test.dev/Alice ": "https://ilp.interledger-test.dev/Alice",
+		"https://ilp.interledger-test.dev:443/a":    "https://ilp.interledger-test.dev/a",
+		"https://w.example/a/":                      "https://w.example/a",
+		"$w.example":                                "https://w.example/.well-known/pay",
+		"https://w.example/":                        "https://w.example/.well-known/pay",
+		"https://127.0.0.1:8443/alice":              "https://127.0.0.1:8443/alice",
 	}
 	for in, want := range ok {
 		got, err := NormalizeWalletAddress(in)
@@ -28,7 +28,7 @@ func TestNormalizeWalletAddress(t *testing.T) {
 }
 
 func TestSplitAndUsers(t *testing.T) {
-	if got := GitHubUser("Cozmin"); got != "github:cozmin" {
+	if got := GitHubUser("Alice"); got != "github:alice" {
 		t.Errorf("GitHubUser = %q", got)
 	}
 	if got := WalletUser("https://w.example/Al"); got != "open_payments:https://w.example/Al" {
@@ -38,11 +38,11 @@ func TestSplitAndUsers(t *testing.T) {
 	if p != OpenPayments || name != "https://w.example/a" || !ok {
 		t.Errorf("Split = %q, %q, %v", p, name, ok)
 	}
-	p, name, ok = Split("github:cozmin")
-	if p != GitHub || name != "cozmin" || !ok {
+	p, name, ok = Split("github:alice")
+	if p != GitHub || name != "alice" || !ok {
 		t.Errorf("Split github = %q, %q, %v", p, name, ok)
 	}
-	for _, id := range []string{"cozmin", "github:", "google:x", ""} {
+	for _, id := range []string{"alice", "github:", "google:x", ""} {
 		if _, _, ok := Split(id); ok {
 			t.Errorf("Split(%q) ok = true", id)
 		}
@@ -51,8 +51,8 @@ func TestSplitAndUsers(t *testing.T) {
 
 func TestParseCLIUser(t *testing.T) {
 	ok := map[string]string{
-		"Cozmin":                             "github:cozmin",
-		"github:Cozmin":                      "github:cozmin",
+		"Alice":                              "github:alice",
+		"github:Alice":                       "github:alice",
 		"$w.example/Al":                      "open_payments:https://w.example/Al",
 		"https://W.example/Al":               "open_payments:https://w.example/Al",
 		"open_payments:$w.example/Al":        "open_payments:https://w.example/Al",
@@ -72,7 +72,7 @@ func TestParseCLIUser(t *testing.T) {
 }
 
 func TestDescribeAndLabel(t *testing.T) {
-	if got := Describe("github:cozmin"); got != "GitHub account cozmin" {
+	if got := Describe("github:alice"); got != "GitHub account alice" {
 		t.Errorf("Describe = %q", got)
 	}
 	if got := Describe("open_payments:https://w.example/a"); got != "Open Payments wallet address https://w.example/a" {

@@ -102,7 +102,7 @@ func authRequestGone(t *testing.T, srv *Server, id string) {
 }
 
 func TestAuthorizeShowsSigninPage(t *testing.T) {
-	_, ts, _, _ := newTestServerOP(t, []string{"cozmin"}, []string{"cozmin"}, true)
+	_, ts, _, _ := newTestServerOP(t, []string{"alice"}, []string{"alice"}, true)
 	id := registerNamedClient(t, ts, `<script>alert(1)</script>`, claudeRedirect)
 	c := newBrowser(t)
 	resp, body := get(t, c, authorizeURL(ts, id, claudeRedirect, nil))
@@ -156,7 +156,7 @@ func TestAuthorizeGitHubOnlySkipsPage(t *testing.T) {
 }
 
 func TestSigninOpenPaymentsOnly(t *testing.T) {
-	_, ts, _, _ := newTestServerOP(t, nil, []string{"cozmin"}, false)
+	_, ts, _, _ := newTestServerOP(t, nil, []string{"alice"}, false)
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
 	reqID, body := signinPage(t, c, ts, id)
@@ -177,8 +177,8 @@ func TestSigninOpenPaymentsOnly(t *testing.T) {
 }
 
 func TestGitHubStart(t *testing.T) {
-	_, ts, gh, _ := newTestServerOP(t, []string{"cozmin"}, []string{"cozmin"}, true)
-	gh.SetUser("cozmin", 1)
+	_, ts, gh, _ := newTestServerOP(t, []string{"alice"}, []string{"alice"}, true)
+	gh.SetUser("alice", 1)
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
 	reqID, _ := signinPage(t, c, ts, id)
@@ -198,7 +198,7 @@ func TestGitHubStart(t *testing.T) {
 	}
 	resp, _ = get(t, c, loc.String())
 	resp, body = get(t, c, resp.Header.Get("Location"))
-	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Signed in with GitHub as <strong>cozmin</strong>") {
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Signed in with GitHub as <strong>alice</strong>") {
 		t.Fatalf("consent: status %d: %s", resp.StatusCode, body)
 	}
 
@@ -208,11 +208,11 @@ func TestGitHubStart(t *testing.T) {
 }
 
 func TestWalletLoginFlow(t *testing.T) {
-	srv, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
+	srv, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
 	reqID, _ := signinPage(t, c, ts, id)
-	wallet := fop.Wallet("cozmin")
+	wallet := fop.Wallet("alice")
 	cb := interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, " "+wallet+" "))
 
 	bodies := fop.GrantBodies()
@@ -262,7 +262,7 @@ func TestWalletLoginFlow(t *testing.T) {
 }
 
 func TestWalletNotAllowedMakesNoRequest(t *testing.T) {
-	srv, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
+	srv, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
 	reqID, _ := signinPage(t, c, ts, id)
@@ -278,7 +278,7 @@ func TestWalletNotAllowedMakesNoRequest(t *testing.T) {
 }
 
 func TestWalletBadInput(t *testing.T) {
-	_, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
+	_, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
 	reqID, _ := signinPage(t, c, ts, id)
@@ -303,7 +303,7 @@ func TestWalletBadInput(t *testing.T) {
 		t.Fatalf("fake got requests: %v", got)
 	}
 	// The auth request is still good.
-	cb := interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin")))
+	cb := interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("alice")))
 	resp, body := get(t, c, cb)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `value="approve"`) {
 		t.Fatalf("callback: status %d: %s", resp.StatusCode, body)
@@ -313,7 +313,7 @@ func TestWalletBadInput(t *testing.T) {
 // Wallet fetch and grant request failures re-render the page; the user can
 // fix the address and retry.
 func TestWalletUnreachable(t *testing.T) {
-	_, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin", "broken", "noauth"}, false)
+	_, ts, _, fop := newTestServerOP(t, nil, []string{"alice", "broken", "noauth"}, false)
 	fop.SetWalletID("broken", "")
 	fop.SetAuthServer("noauth", fop.URL+"/missing")
 	id := registerClient(t, ts, claudeRedirect)
@@ -326,19 +326,19 @@ func TestWalletUnreachable(t *testing.T) {
 			t.Errorf("%s: body %s", name, body)
 		}
 	}
-	cb := interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin")))
+	cb := interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("alice")))
 	if resp, body := get(t, c, cb); resp.StatusCode != http.StatusOK {
 		t.Fatalf("callback: status %d: %s", resp.StatusCode, body)
 	}
 }
 
 func TestWalletIDCanonicalizesSame(t *testing.T) {
-	srv, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
-	wallet := fop.Wallet("cozmin")
-	fop.SetWalletID("cozmin", "HTTPS://"+strings.TrimPrefix(wallet, "https://")+"/")
+	srv, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
+	wallet := fop.Wallet("alice")
+	fop.SetWalletID("alice", "HTTPS://"+strings.TrimPrefix(wallet, "https://")+"/")
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
-	resp, body := walletLogin(t, c, ts, fop, id, "cozmin")
+	resp, body := walletLogin(t, c, ts, fop, id, "alice")
 	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Signed in with Open Payments as <strong>"+wallet+"</strong>") {
 		t.Fatalf("callback: status %d: %s", resp.StatusCode, body)
 	}
@@ -352,17 +352,17 @@ func TestWalletIDCanonicalizesSame(t *testing.T) {
 }
 
 func TestWalletIDDiffers(t *testing.T) {
-	srv, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
-	fop.SetWalletID("cozmin", fop.Wallet("other"))
+	srv, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
+	fop.SetWalletID("alice", fop.Wallet("other"))
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
 	reqID, _ := signinPage(t, c, ts, id)
-	resp, body := submitWallet(t, c, ts, reqID, fop.Wallet("cozmin"))
+	resp, body := submitWallet(t, c, ts, reqID, fop.Wallet("alice"))
 	checkHTMLError(t, resp, http.StatusForbidden)
 	if !strings.Contains(body, "Open Payments wallet address "+fop.Wallet("other")) {
 		t.Errorf("body: %s", body)
 	}
-	if !hasRequest(fop, "GET /cozmin") || hasRequest(fop, "POST /auth") {
+	if !hasRequest(fop, "GET /alice") || hasRequest(fop, "POST /auth") {
 		t.Fatalf("requests %v", fop.Requests())
 	}
 	authRequestGone(t, srv, reqID)
@@ -372,19 +372,19 @@ func TestWalletIDDiffers(t *testing.T) {
 // allowlisted one: its authServer would then vouch for a wallet it doesn't
 // host.
 func TestWalletIDOtherOrigin(t *testing.T) {
-	srv, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
-	const victim = "https://other.example/cozmin"
+	srv, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
+	const victim = "https://other.example/alice"
 	srv.cfg.AllowedUsers.OpenPayments = append(srv.cfg.AllowedUsers.OpenPayments, victim)
-	for _, id := range []string{victim, strings.Replace(fop.Wallet("cozmin"), "127.0.0.1", "localhost", 1)} {
+	for _, id := range []string{victim, strings.Replace(fop.Wallet("alice"), "127.0.0.1", "localhost", 1)} {
 		if id != victim {
 			srv.cfg.AllowedUsers.OpenPayments = append(srv.cfg.AllowedUsers.OpenPayments, id)
 		}
-		fop.SetWalletID("cozmin", id)
+		fop.SetWalletID("alice", id)
 		c := newBrowser(t)
 		reqID, _ := signinPage(t, c, ts, registerClient(t, ts, claudeRedirect))
-		resp, body := submitWallet(t, c, ts, reqID, fop.Wallet("cozmin"))
+		resp, body := submitWallet(t, c, ts, reqID, fop.Wallet("alice"))
 		checkHTMLError(t, resp, http.StatusForbidden)
-		if !strings.Contains(body, "Open Payments wallet address "+fop.Wallet("cozmin")) || strings.Contains(body, id) {
+		if !strings.Contains(body, "Open Payments wallet address "+fop.Wallet("alice")) || strings.Contains(body, id) {
 			t.Errorf("%s: body %s", id, body)
 		}
 		if hasRequest(fop, "POST /auth") {
@@ -397,11 +397,11 @@ func TestWalletIDOtherOrigin(t *testing.T) {
 // The id may differ from the typed address in path only (same origin), if
 // it is allowlisted too.
 func TestWalletIDSameOriginOtherPath(t *testing.T) {
-	_, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin", "cozmin2"}, false)
-	fop.SetWalletID("cozmin", fop.Wallet("cozmin2"))
+	_, ts, _, fop := newTestServerOP(t, nil, []string{"alice", "alice2"}, false)
+	fop.SetWalletID("alice", fop.Wallet("alice2"))
 	c := newBrowser(t)
-	resp, body := walletLogin(t, c, ts, fop, registerClient(t, ts, claudeRedirect), "cozmin")
-	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Signed in with Open Payments as <strong>"+fop.Wallet("cozmin2")+"</strong>") {
+	resp, body := walletLogin(t, c, ts, fop, registerClient(t, ts, claudeRedirect), "alice")
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Signed in with Open Payments as <strong>"+fop.Wallet("alice2")+"</strong>") {
 		t.Fatalf("status %d: %s", resp.StatusCode, body)
 	}
 }
@@ -409,9 +409,9 @@ func TestWalletIDSameOriginOtherPath(t *testing.T) {
 // afterLogin on a request that already has a user is a stale link, and the
 // first user stays.
 func TestAfterLoginOnce(t *testing.T) {
-	srv, ts, _, fop := newTestServerOP(t, []string{"cozmin"}, []string{"cozmin"}, true)
+	srv, ts, _, fop := newTestServerOP(t, []string{"alice"}, []string{"alice"}, true)
 	c := newBrowser(t)
-	_, body := walletLogin(t, c, ts, fop, registerClient(t, ts, claudeRedirect), "cozmin")
+	_, body := walletLogin(t, c, ts, fop, registerClient(t, ts, claudeRedirect), "alice")
 	ctx := context.Background()
 	ar, err := srv.store.GetAuthRequest(ctx, consentRequestID(t, body))
 	if err != nil {
@@ -420,23 +420,23 @@ func TestAfterLoginOnce(t *testing.T) {
 	stale := *ar
 	stale.Login = ""
 	w := httptest.NewRecorder()
-	srv.afterLogin(w, httptest.NewRequest(http.MethodGet, "/oauth/github/callback", nil), &stale, "github:cozmin", "cozmin", 1)
+	srv.afterLogin(w, httptest.NewRequest(http.MethodGet, "/oauth/github/callback", nil), &stale, "github:alice", "alice", 1)
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "Login link expired") {
 		t.Fatalf("second login: status %d: %s", w.Code, w.Body)
 	}
 	got, err := srv.store.GetAuthRequest(ctx, ar.ID)
-	if err != nil || got.Login != "open_payments:"+fop.Wallet("cozmin") || got.GitHubID != 0 {
+	if err != nil || got.Login != "open_payments:"+fop.Wallet("alice") || got.GitHubID != 0 {
 		t.Fatalf("%+v %v", got, err)
 	}
 }
 
 func TestWalletDeclined(t *testing.T) {
-	srv, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
+	srv, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
 	fop.SetDecline(true)
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
 	reqID, _ := signinPage(t, c, ts, id)
-	resp, _ := get(t, c, interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin"))))
+	resp, _ := get(t, c, interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("alice"))))
 	q := redirectQuery(t, resp, claudeRedirect)
 	if q.Get("error") != "access_denied" || q.Get("state") != testState || q.Get("iss") != ts.URL || q.Get("code") != "" {
 		t.Fatalf("query %v", q)
@@ -445,11 +445,11 @@ func TestWalletDeclined(t *testing.T) {
 }
 
 func TestWalletResultOther(t *testing.T) {
-	srv, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
+	srv, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
 	reqID, _ := signinPage(t, c, ts, id)
-	startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin"))
+	startWallet(t, c, ts, fop, reqID, fop.Wallet("alice"))
 	resp, _ := get(t, c, ts.URL+wantOPCallback+"?result=something_else")
 	if q := redirectQuery(t, resp, claudeRedirect); q.Get("error") != "server_error" || q.Get("code") != "" {
 		t.Fatalf("query %v", q)
@@ -458,12 +458,12 @@ func TestWalletResultOther(t *testing.T) {
 }
 
 func TestWalletCallbackMissingParams(t *testing.T) {
-	srv, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
+	srv, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
 	id := registerClient(t, ts, claudeRedirect)
 	for _, query := range []string{"", "?interact_ref=x", "?hash=y"} {
 		c := newBrowser(t)
 		reqID, _ := signinPage(t, c, ts, id)
-		startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin"))
+		startWallet(t, c, ts, fop, reqID, fop.Wallet("alice"))
 		resp, _ := get(t, c, ts.URL+wantOPCallback+query)
 		checkHTMLError(t, resp, http.StatusBadRequest)
 		authRequestGone(t, srv, reqID)
@@ -471,12 +471,12 @@ func TestWalletCallbackMissingParams(t *testing.T) {
 }
 
 func TestWalletBadHash(t *testing.T) {
-	srv, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
+	srv, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
 	fop.SetBadHash(true)
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
 	reqID, _ := signinPage(t, c, ts, id)
-	cb := interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin")))
+	cb := interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("alice")))
 	resp, body := get(t, c, cb)
 	checkHTMLError(t, resp, http.StatusBadRequest)
 	if !strings.Contains(body, "Wallet login failed") || !strings.Contains(body, "Couldn&#39;t confirm you own that wallet address. Start again from your app.") {
@@ -496,12 +496,12 @@ func TestWalletBadHash(t *testing.T) {
 }
 
 func TestWalletSubjectMismatch(t *testing.T) {
-	srv, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin", "other"}, false)
+	srv, ts, _, fop := newTestServerOP(t, nil, []string{"alice", "other"}, false)
 	fop.SetSubject(fop.Wallet("other"))
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
 	reqID, _ := signinPage(t, c, ts, id)
-	resp, body := get(t, c, interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin"))))
+	resp, body := get(t, c, interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("alice"))))
 	checkHTMLError(t, resp, http.StatusBadRequest)
 	if !strings.Contains(body, "Couldn&#39;t confirm you own that wallet address.") {
 		t.Fatalf("body: %s", body)
@@ -510,12 +510,12 @@ func TestWalletSubjectMismatch(t *testing.T) {
 }
 
 func TestWalletNotFinalized(t *testing.T) {
-	srv, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
+	srv, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
 	fop.SetContinueInteract(true)
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
 	reqID, _ := signinPage(t, c, ts, id)
-	resp, body := get(t, c, interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin"))))
+	resp, body := get(t, c, interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("alice"))))
 	checkHTMLError(t, resp, http.StatusBadGateway)
 	if !strings.Contains(body, "Wallet login failed") || !strings.Contains(body, "Couldn&#39;t complete the wallet login. Try again.") {
 		t.Fatalf("body: %s", body)
@@ -524,11 +524,11 @@ func TestWalletNotFinalized(t *testing.T) {
 }
 
 func TestWalletCallbackOtherBrowser(t *testing.T) {
-	_, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
+	_, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
 	reqID, _ := signinPage(t, c, ts, id)
-	cb := interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin")))
+	cb := interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("alice")))
 
 	resp, body := get(t, newBrowser(t), cb)
 	checkHTMLError(t, resp, http.StatusBadRequest)
@@ -553,14 +553,14 @@ func TestWalletCallbackOtherBrowser(t *testing.T) {
 }
 
 func TestWalletResubmit(t *testing.T) {
-	_, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
+	_, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
 	id := registerClient(t, ts, claudeRedirect)
 
 	t.Run("second attempt completes", func(t *testing.T) {
 		c := newBrowser(t)
 		reqID, _ := signinPage(t, c, ts, id)
-		startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin"))
-		second := startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin"))
+		startWallet(t, c, ts, fop, reqID, fop.Wallet("alice"))
+		second := startWallet(t, c, ts, fop, reqID, fop.Wallet("alice"))
 		resp, body := get(t, c, interactOP(t, ts, fop, second))
 		if resp.StatusCode != http.StatusOK || !strings.Contains(body, `value="approve"`) {
 			t.Fatalf("status %d: %s", resp.StatusCode, body)
@@ -570,8 +570,8 @@ func TestWalletResubmit(t *testing.T) {
 	t.Run("stale attempt fails cleanly", func(t *testing.T) {
 		c := newBrowser(t)
 		reqID, _ := signinPage(t, c, ts, id)
-		first := startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin"))
-		startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin"))
+		first := startWallet(t, c, ts, fop, reqID, fop.Wallet("alice"))
+		startWallet(t, c, ts, fop, reqID, fop.Wallet("alice"))
 		resp, body := get(t, c, interactOP(t, ts, fop, first))
 		checkHTMLError(t, resp, http.StatusBadRequest)
 		if !strings.Contains(body, "Wallet login failed") {
@@ -580,7 +580,7 @@ func TestWalletResubmit(t *testing.T) {
 		if jarAuthCookie(c, ts) != nil {
 			t.Error("cookie not cleared")
 		}
-		resp, body = walletLogin(t, c, ts, fop, id, "cozmin")
+		resp, body = walletLogin(t, c, ts, fop, id, "alice")
 		if resp.StatusCode != http.StatusOK || !strings.Contains(body, `value="approve"`) {
 			t.Fatalf("fresh authorize: status %d: %s", resp.StatusCode, body)
 		}
@@ -588,11 +588,11 @@ func TestWalletResubmit(t *testing.T) {
 }
 
 func TestWalletCallbackReplay(t *testing.T) {
-	_, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
+	_, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
 	reqID, _ := signinPage(t, c, ts, id)
-	cb := interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin")))
+	cb := interactOP(t, ts, fop, startWallet(t, c, ts, fop, reqID, fop.Wallet("alice")))
 	resp, body := get(t, c, cb)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("callback: status %d: %s", resp.StatusCode, body)
@@ -603,7 +603,7 @@ func TestWalletCallbackReplay(t *testing.T) {
 		t.Fatalf("replay: %s", body)
 	}
 	// Starting another wallet login after login is a stale link too.
-	resp, _ = submitWallet(t, c, ts, reqID, fop.Wallet("cozmin"))
+	resp, _ = submitWallet(t, c, ts, reqID, fop.Wallet("alice"))
 	checkHTMLError(t, resp, http.StatusBadRequest)
 	// The replay didn't spoil the real consent.
 	resp, _ = postForm(t, c, ts.URL+consentPath, url.Values{"request": {reqID}, "action": {"approve"}})
@@ -614,23 +614,23 @@ func TestWalletCallbackReplay(t *testing.T) {
 
 // Remembered consent skips the page for wallet users too.
 func TestWalletConsentRemembered(t *testing.T) {
-	_, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
+	_, ts, _, fop := newTestServerOP(t, nil, []string{"alice"}, false)
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
-	_, body := walletLogin(t, c, ts, fop, id, "cozmin")
+	_, body := walletLogin(t, c, ts, fop, id, "alice")
 	postForm(t, c, ts.URL+consentPath, url.Values{"request": {consentRequestID(t, body)}, "action": {"approve"}})
-	resp, _ := walletLogin(t, c, ts, fop, id, "cozmin")
+	resp, _ := walletLogin(t, c, ts, fop, id, "alice")
 	if q := redirectQuery(t, resp, claudeRedirect); q.Get("code") == "" {
 		t.Fatalf("query %v", q)
 	}
 }
 
 func TestWalletNoSecretsLogged(t *testing.T) {
-	srv, ts, _, fop, logs := newTestServerOPLogs(t, nil, []string{"cozmin"}, false)
+	srv, ts, _, fop, logs := newTestServerOPLogs(t, nil, []string{"alice"}, false)
 	id := registerClient(t, ts, claudeRedirect)
 	c := newBrowser(t)
 	reqID, _ := signinPage(t, c, ts, id)
-	redirect := startWallet(t, c, ts, fop, reqID, fop.Wallet("cozmin"))
+	redirect := startWallet(t, c, ts, fop, reqID, fop.Wallet("alice"))
 
 	// Read the stored pending state and put it back unchanged.
 	ctx := context.Background()
@@ -670,7 +670,7 @@ func TestWalletNoSecretsLogged(t *testing.T) {
 		t.Fatal("captured client nonce doesn't match the grant request")
 	}
 	out := logs.String()
-	if !strings.Contains(out, fop.Wallet("cozmin")) {
+	if !strings.Contains(out, fop.Wallet("alice")) {
 		t.Errorf("wallet address not logged: %s", out)
 	}
 	for what, v := range secrets {

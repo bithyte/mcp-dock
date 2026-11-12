@@ -25,7 +25,7 @@ const (
 )
 
 // newTestServer starts an httptest server serving the oauth routes, with
-// public_url set to its own URL and allowlist ["cozmin"]. Logs are discarded.
+// public_url set to its own URL and allowlist ["alice"]. Logs are discarded.
 func newTestServer(t *testing.T) (*Server, *httptest.Server, *testutil.FakeGitHub) {
 	t.Helper()
 	return newTestServerLog(t, io.Discard)
@@ -75,7 +75,7 @@ func newTestServerLog(t *testing.T, logOut io.Writer) (*Server, *httptest.Server
 		PublicURL:    ts.URL,
 		DataDir:      t.TempDir(),
 		Providers:    config.ProvidersConfig{GitHub: &config.GitHubConfig{ClientID: testGitHubClientID, ClientSecret: testGitHubClientSecret}},
-		AllowedUsers: config.AllowedUsers{GitHub: []string{"cozmin"}},
+		AllowedUsers: config.AllowedUsers{GitHub: []string{"alice"}},
 	}
 	srv := New(Options{
 		Config: cfg,
@@ -98,7 +98,7 @@ const testGatewayWallet = "https://gateway.example/mcp"
 // newTestServerOP starts an oauth server with Open Payments login against a
 // fake wallet and auth server, and GitHub login too when withGitHub is set
 // (the returned FakeGitHub is nil otherwise). allowWallets are wallet names
-// on the fake ("cozmin" allows fop.Wallet("cozmin")). Logs are discarded.
+// on the fake ("alice" allows fop.Wallet("alice")). Logs are discarded.
 func newTestServerOP(t *testing.T, allowGitHub, allowWallets []string, withGitHub bool) (*Server, *httptest.Server, *testutil.FakeGitHub, *testutil.FakeOpenPayments) {
 	t.Helper()
 	srv, ts, gh, fop, _ := newTestServerOPLogs(t, allowGitHub, allowWallets, withGitHub)

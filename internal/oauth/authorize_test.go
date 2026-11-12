@@ -414,7 +414,7 @@ func TestCallbackNotAllowed(t *testing.T) {
 func TestCallbackCookieMismatch(t *testing.T) {
 	_, ts, fake := newTestServer(t)
 	id := registerClient(t, ts, claudeRedirect)
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	c := newBrowser(t)
 	resp, _ := get(t, c, authorizeURL(ts, id, claudeRedirect, nil))
 	resp, _ = get(t, c, resp.Header.Get("Location"))
@@ -466,14 +466,14 @@ func TestCallbackGitHubDenied(t *testing.T) {
 func TestFirstLoginShowsConsent(t *testing.T) {
 	_, ts, fake := newTestServer(t)
 	id := registerClient(t, ts, claudeRedirect)
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	c := newBrowser(t)
 	resp, body := login(t, c, ts, fake, id, claudeRedirect)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status %d: %s", resp.StatusCode, body)
 	}
 	checkHTMLHeaders(t, resp)
-	for _, want := range []string{testClient, "claude.ai", "cozmin", `action="/oauth/consent"`, `value="approve"`, `value="deny"`} {
+	for _, want := range []string{testClient, "claude.ai", "alice", `action="/oauth/consent"`, `value="approve"`, `value="deny"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("consent page lacks %q", want)
 		}
@@ -489,7 +489,7 @@ func TestFirstLoginShowsConsent(t *testing.T) {
 func TestConsentEscapesClientName(t *testing.T) {
 	_, ts, fake := newTestServer(t)
 	id := registerNamedClient(t, ts, `<script>alert(1)</script>`, claudeRedirect)
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	_, body := login(t, newBrowser(t), ts, fake, id, claudeRedirect)
 	if strings.Contains(body, "<script>") || !strings.Contains(body, "&lt;script&gt;") {
 		t.Fatalf("client name not escaped: %s", body)
@@ -499,7 +499,7 @@ func TestConsentEscapesClientName(t *testing.T) {
 func TestConsentApproveIssuesCode(t *testing.T) {
 	srv, ts, fake := newTestServer(t)
 	id := registerClient(t, ts, claudeRedirect)
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	c := newBrowser(t)
 	_, body := login(t, c, ts, fake, id, claudeRedirect)
 	reqID := consentRequestID(t, body)
@@ -521,7 +521,7 @@ func TestConsentApproveIssuesCode(t *testing.T) {
 		t.Fatalf("code not stored by hash: %v", err)
 	}
 	if got.ClientID != id || got.RedirectURI != claudeRedirect || got.CodeChallenge != testChallenge() ||
-		got.Login != "github:cozmin" || got.Resource != ts.URL+"/mcp" {
+		got.Login != "github:alice" || got.Resource != ts.URL+"/mcp" {
 		t.Fatalf("stored code %+v", got)
 	}
 	if d := got.ExpiresAt.Sub(srv.now()); d < 4*60e9 || d > 5*60e9+1e9 {
@@ -530,10 +530,10 @@ func TestConsentApproveIssuesCode(t *testing.T) {
 	if _, err := srv.store.GetAuthRequest(ctx, reqID); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("auth request not deleted: %v", err)
 	}
-	if ok, _ := srv.store.HasConsent(ctx, "github:cozmin", id, claudeRedirect); !ok {
+	if ok, _ := srv.store.HasConsent(ctx, "github:alice", id, claudeRedirect); !ok {
 		t.Error("consent not saved")
 	}
-	if gid, ok, _ := srv.store.GitHubID(ctx, "github:cozmin"); !ok || gid != 1 {
+	if gid, ok, _ := srv.store.GitHubID(ctx, "github:alice"); !ok || gid != 1 {
 		t.Errorf("github id %d %v", gid, ok)
 	}
 	// Replaying the consent POST, even with the cookie restored, issues nothing.
@@ -547,7 +547,7 @@ func TestConsentApproveIssuesCode(t *testing.T) {
 func TestIssueCodeOnlyOnce(t *testing.T) {
 	srv, ts, fake := newTestServer(t)
 	id := registerClient(t, ts, claudeRedirect)
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	_, body := login(t, newBrowser(t), ts, fake, id, claudeRedirect)
 	ar, err := srv.store.GetAuthRequest(context.Background(), consentRequestID(t, body))
 	if err != nil {
@@ -571,7 +571,7 @@ func TestIssueCodeOnlyOnce(t *testing.T) {
 func TestConsentConcurrentApprovals(t *testing.T) {
 	_, ts, fake := newTestServer(t)
 	id := registerClient(t, ts, claudeRedirect)
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	c := newBrowser(t)
 	_, body := login(t, c, ts, fake, id, claudeRedirect)
 	reqID := consentRequestID(t, body)
@@ -608,7 +608,7 @@ func TestConsentConcurrentApprovals(t *testing.T) {
 func TestConsentDeny(t *testing.T) {
 	srv, ts, fake := newTestServer(t)
 	id := registerClient(t, ts, claudeRedirect)
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	c := newBrowser(t)
 	_, body := login(t, c, ts, fake, id, claudeRedirect)
 	resp, _ := postForm(t, c, ts.URL+"/oauth/consent", url.Values{"request": {consentRequestID(t, body)}, "action": {"deny"}})
@@ -616,7 +616,7 @@ func TestConsentDeny(t *testing.T) {
 	if q.Get("error") != "access_denied" || q.Get("state") != testState || q.Get("iss") != ts.URL || q.Get("code") != "" {
 		t.Fatalf("query %v", q)
 	}
-	if ok, _ := srv.store.HasConsent(context.Background(), "github:cozmin", id, claudeRedirect); ok {
+	if ok, _ := srv.store.HasConsent(context.Background(), "github:alice", id, claudeRedirect); ok {
 		t.Error("consent saved on deny")
 	}
 }
@@ -624,7 +624,7 @@ func TestConsentDeny(t *testing.T) {
 func TestConsentRequiresCookieAndLogin(t *testing.T) {
 	_, ts, fake := newTestServer(t)
 	id := registerClient(t, ts, claudeRedirect)
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 
 	// Logged in, but POST from a browser without the cookie.
 	c := newBrowser(t)
@@ -660,7 +660,7 @@ func TestConsentRequiresCookieAndLogin(t *testing.T) {
 func TestConsentRemembered(t *testing.T) {
 	_, ts, fake := newTestServer(t)
 	id := registerClient(t, ts, claudeRedirect)
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	c := newBrowser(t)
 	_, body := login(t, c, ts, fake, id, claudeRedirect)
 	postForm(t, c, ts.URL+"/oauth/consent", url.Values{"request": {consentRequestID(t, body)}, "action": {"approve"}})
@@ -696,7 +696,7 @@ func TestConsentRememberedPerRedirectURI(t *testing.T) {
 	_, ts, fake := newTestServer(t)
 	const evil = "https://evil.example/cb"
 	id := registerNamedClient(t, ts, "Claude", claudeRedirect, evil)
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	c := newBrowser(t)
 	approve(t, c, ts, fake, id, claudeRedirect)
 
@@ -717,7 +717,7 @@ func TestConsentRememberedPerRedirectURI(t *testing.T) {
 func TestConsentRememberedLoopbackAnyPort(t *testing.T) {
 	_, ts, fake := newTestServer(t)
 	id := registerNamedClient(t, ts, "cli", "http://127.0.0.1:1111/cb", "http://127.0.0.1/other")
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	c := newBrowser(t)
 	approve(t, c, ts, fake, id, "http://127.0.0.1:2222/cb")
 
@@ -737,7 +737,7 @@ func TestConsentShowsHomographHostAsPunycode(t *testing.T) {
 	// %D0%B0 is Cyrillic small a (U+0430): "аpple.com" looks like apple.com.
 	redirect := "https://%D0%B0pple.com/cb"
 	id := registerClient(t, ts, redirect)
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	resp, body := login(t, newBrowser(t), ts, fake, id, redirect)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status %d", resp.StatusCode)
@@ -754,7 +754,7 @@ func TestConsentShowsHomographHostAsPunycode(t *testing.T) {
 // so an app scheme can't hide where the code goes behind generic text.
 func TestConsentShowsFullNonHTTPSRedirect(t *testing.T) {
 	_, ts, fake := newTestServer(t)
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	for redirect, want := range map[string]string{
 		"com.example.app:/oauth2redirect?a=1&b=<x>": "com.example.app:/oauth2redirect?a=1&amp;b=&lt;x&gt;",
 		"cursor://anysphere.cursor/cb?x=1":          "cursor://anysphere.cursor/cb?x=1",
@@ -792,25 +792,25 @@ func TestRedirectDisplay(t *testing.T) {
 func TestGitHubIDMismatchDenied(t *testing.T) {
 	srv, ts, fake, logs := newTestServerLogs(t)
 	id := registerClient(t, ts, claudeRedirect)
-	if err := srv.store.SetGitHubID(context.Background(), "github:cozmin", 1); err != nil {
+	if err := srv.store.SetGitHubID(context.Background(), "github:alice", 1); err != nil {
 		t.Fatal(err)
 	}
-	fake.SetUser("cozmin", 2)
+	fake.SetUser("alice", 2)
 	resp, body := login(t, newBrowser(t), ts, fake, id, claudeRedirect)
 	checkHTMLError(t, resp, http.StatusForbidden)
-	if !strings.Contains(body, "cozmin") {
+	if !strings.Contains(body, "alice") {
 		t.Errorf("body: %s", body)
 	}
 	var warn string
 	for _, line := range strings.Split(logs.String(), "\n") {
-		if strings.Contains(line, `"level":"WARN"`) && strings.Contains(line, `"user":"github:cozmin"`) {
+		if strings.Contains(line, `"level":"WARN"`) && strings.Contains(line, `"user":"github:alice"`) {
 			warn = line
 		}
 	}
 	if warn == "" || !strings.Contains(warn, `:1`) || !strings.Contains(warn, `:2`) {
 		t.Fatalf("no warn log with login and both IDs: %s", logs.String())
 	}
-	if gid, _, _ := srv.store.GitHubID(context.Background(), "github:cozmin"); gid != 1 {
+	if gid, _, _ := srv.store.GitHubID(context.Background(), "github:alice"); gid != 1 {
 		t.Errorf("pinned id changed to %d", gid)
 	}
 }
@@ -818,7 +818,7 @@ func TestGitHubIDMismatchDenied(t *testing.T) {
 func TestNoSecretsLogged(t *testing.T) {
 	_, ts, fake, logs := newTestServerLogs(t)
 	id := registerClient(t, ts, claudeRedirect)
-	fake.SetUser("cozmin", 1)
+	fake.SetUser("alice", 1)
 	c := newBrowser(t)
 	_, body := login(t, c, ts, fake, id, claudeRedirect)
 	reqID := consentRequestID(t, body)
@@ -835,7 +835,7 @@ func TestNoSecretsLogged(t *testing.T) {
 func TestLoginCaseInsensitive(t *testing.T) {
 	_, ts, fake := newTestServer(t)
 	id := registerClient(t, ts, claudeRedirect)
-	fake.SetUser("Cozmin", 1)
+	fake.SetUser("Alice", 1)
 	resp, body := login(t, newBrowser(t), ts, fake, id, claudeRedirect)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `value="approve"`) {
 		t.Fatalf("status %d: %s", resp.StatusCode, body)
@@ -861,9 +861,9 @@ func TestConsentKey(t *testing.T) {
 func TestConsentNamesProvider(t *testing.T) {
 	_, ts, fake := newTestServer(t)
 	id := registerClient(t, ts, claudeRedirect)
-	fake.SetUser("Cozmin", 1)
+	fake.SetUser("Alice", 1)
 	_, body := login(t, newBrowser(t), ts, fake, id, claudeRedirect)
-	if !strings.Contains(body, "Signed in with GitHub as <strong>Cozmin</strong>") {
+	if !strings.Contains(body, "Signed in with GitHub as <strong>Alice</strong>") {
 		t.Fatalf("body: %s", body)
 	}
 }

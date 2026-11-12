@@ -148,7 +148,7 @@ See `config.example.yaml`. Unknown fields are rejected. A bad config fails start
   - `env_from`: names of gateway env vars to pass through (secrets). Each must be set at startup.
   - `deny_args`: dotted argument paths rejected before the call reaches the upstream (e.g. `attachment.path`). Each segment is an exact property name (no wildcards), matched case-insensitively. Arrays along the path are looked through, so `attachment.path` also blocks `{"attachment": [{"path": ...}]}`. Denied paths are also removed from the tool schemas clients see. A path that matches no parameter of any of the upstream's tools is logged as a warning, since it's probably a typo.
 
-Users are separate per provider. GitHub login `cozmin` is user `github:cozmin`; wallet `$example.com/cozmin` is user `open_payments:https://example.com/cozmin`. The same person signing in both ways is two users, each needing their own allowlist entry and having their own consent and tokens. There is no account linking. Existing GitHub users are migrated to `github:<login>` ids at startup, so their sessions and GitHub ID pins carry over.
+Users are separate per provider. GitHub login `alice` is user `github:alice`; wallet `$example.com/alice` is user `open_payments:https://example.com/alice`. The same person signing in both ways is two users, each needing their own allowlist entry and having their own consent and tokens. There is no account linking. Existing GitHub users are migrated to `github:<login>` ids at startup, so their sessions and GitHub ID pins carry over.
 
 Wallet login checks, in order: the typed address must be on the allowlist before the gateway makes any request to it (so it never fetches a URL a stranger typed); the `id` in the wallet's own document must be on the allowlist too, and have the same scheme, host and port as what was typed; and the address is checked once more after the wallet provider finalizes the grant.
 
@@ -188,7 +188,7 @@ These steps haven't been checked against jaypost's own docs. The owner should co
 
 If a login is already bound to one GitHub numeric ID and someone with a different ID signs in as it, the gateway denies and logs a warning. `users reset` clears that user's stored GitHub ID, consents, and tokens so it can re-bind. It operates directly on the SQLite DB.
 
-The argument is a GitHub login (`cozmin` or `github:cozmin`) or a wallet address (`$example.com/cozmin`, an `https://` URL, or `open_payments:...`). It only resets that one user; the GitHub and wallet users of the same name are unaffected.
+The argument is a GitHub login (`alice` or `github:alice`) or a wallet address (`$example.com/alice`, an `https://` URL, or `open_payments:...`). It only resets that one user; the GitHub and wallet users of the same name are unaffected.
 
 ## Known limits
 

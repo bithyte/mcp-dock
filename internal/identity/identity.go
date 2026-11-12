@@ -1,5 +1,5 @@
 // Package identity defines provider-prefixed user ids such as
-// "github:cozmin" and "open_payments:https://wallet.example/alice".
+// "github:alice" and "open_payments:https://wallet.example/alice".
 package identity
 
 import (

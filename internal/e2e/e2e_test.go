@@ -90,14 +90,14 @@ type env struct {
 	logs *logBuffer
 	app  *app.App
 	st   *store.Store
-	// cozminWallet is the normalized address of the fake's "cozmin" wallet.
-	cozminWallet string
+	// aliceWallet is the normalized address of the fake's "alice" wallet.
+	aliceWallet string
 }
 
 // newEnv starts the full gateway with the fake upstream as "fake"
 // (deny_args [attachment.path]) plus any extra upstreams. Both login
-// providers are on. Allowlists: GitHub cozmin and friend, and the fake
-// wallet "cozmin".
+// providers are on. Allowlists: GitHub alice and friend, and the fake
+// wallet "alice".
 func newEnv(t *testing.T, extra ...config.UpstreamConfig) *env {
 	t.Helper()
 	bin := testutil.BuildFakeUpstream(t)
@@ -105,11 +105,11 @@ func newEnv(t *testing.T, extra ...config.UpstreamConfig) *env {
 	e.fake = testutil.NewFakeGitHub(t, ghClientID, ghClientSecret)
 	keyPEM, pub := testutil.Ed25519PEM(t)
 	e.op = testutil.NewFakeOpenPayments(t, gatewayWallet, pub)
-	cozminWallet, err := identity.NormalizeWalletAddress(e.op.Wallet("cozmin"))
+	aliceWallet, err := identity.NormalizeWalletAddress(e.op.Wallet("alice"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.cozminWallet = cozminWallet
+	e.aliceWallet = aliceWallet
 
 	// public_url must be known before the handler is built, so start the
 	// listener first and attach the handler afterwards.
@@ -125,7 +125,7 @@ func newEnv(t *testing.T, extra ...config.UpstreamConfig) *env {
 				WalletAddress: gatewayWallet, KeyID: "e2e-key", PrivateKey: keyPEM,
 			},
 		},
-		AllowedUsers: config.AllowedUsers{GitHub: []string{"cozmin", "friend"}, OpenPayments: []string{cozminWallet}},
+		AllowedUsers: config.AllowedUsers{GitHub: []string{"alice", "friend"}, OpenPayments: []string{aliceWallet}},
 		Upstreams: append([]config.UpstreamConfig{{
 			Name:     "fake",
 			Command:  bin,
@@ -430,7 +430,7 @@ func resultText(res *mcp.CallToolResult) string {
 
 func TestEndToEnd(t *testing.T) {
 	e := newEnv(t)
-	token := e.login(t, "Cozmin", 1)
+	token := e.login(t, "Alice", 1)
 	cs := e.connect(t, token, nil)
 
 	waitTools(t, cs, "fake__echo", "fake__notify")
@@ -473,8 +473,8 @@ func TestEndToEnd(t *testing.T) {
 	for _, r := range e.logs.records("tool call") {
 		if r["tool"] == "fake__echo" {
 			echoLogged = true
-			if r["user"] != "github:cozmin" || r["ok"] != true {
-				t.Errorf("audit record %v, want user github:cozmin ok true", r)
+			if r["user"] != "github:alice" || r["ok"] != true {
+				t.Errorf("audit record %v, want user github:alice ok true", r)
 			}
 		}
 	}
@@ -489,7 +489,7 @@ func TestEndToEnd(t *testing.T) {
 func TestEndToEndProgress(t *testing.T) {
 	e := newEnv(t)
 	pc := &progressCounter{}
-	cs := e.connect(t, e.login(t, "cozmin", 1), pc)
+	cs := e.connect(t, e.login(t, "alice", 1), pc)
 	waitTools(t, cs, "fake__sleep")
 
 	params := &mcp.CallToolParams{Name: "fake__sleep", Arguments: map[string]any{"ms": 300}}
@@ -506,9 +506,9 @@ func TestEndToEndProgress(t *testing.T) {
 func TestEndToEndTwoUsers(t *testing.T) {
 	e := newEnv(t)
 	friendPC := &progressCounter{}
-	cozmin := e.connect(t, e.login(t, "cozmin", 1), nil)
+	alice := e.connect(t, e.login(t, "alice", 1), nil)
 	friend := e.connect(t, e.login(t, "friend", 2), friendPC)
-	waitTools(t, cozmin, "fake__echo", "fake__sleep")
+	waitTools(t, alice, "fake__echo", "fake__sleep")
 
 	done := make(chan error, 1)
 	go func() {
@@ -527,9 +527,9 @@ func TestEndToEndTwoUsers(t *testing.T) {
 	}
 
 	start := time.Now()
-	res := call(t, cozmin, "fake__echo", map[string]any{"text": "fast"})
+	res := call(t, alice, "fake__echo", map[string]any{"text": "fast"})
 	if d := time.Since(start); d >= 500*time.Millisecond {
-		t.Fatalf("cozmin's echo took %v while friend's sleep ran", d)
+		t.Fatalf("alice's echo took %v while friend's sleep ran", d)
 	}
 	if resultText(res) != "fast" {
 		t.Fatalf("echo %q", resultText(res))
@@ -547,14 +547,14 @@ func TestEndToEndTwoUsers(t *testing.T) {
 	for _, r := range e.logs.records("tool call") {
 		users[r["user"].(string)] = true
 	}
-	if !users["github:cozmin"] || !users["github:friend"] {
-		t.Fatalf("audit users %v, want cozmin and friend", users)
+	if !users["github:alice"] || !users["github:friend"] {
+		t.Fatalf("audit users %v, want alice and friend", users)
 	}
 }
 
 func TestEndToEndRemovedUser(t *testing.T) {
 	e := newEnv(t)
-	token := e.login(t, "cozmin", 1)
+	token := e.login(t, "alice", 1)
 	cs := e.connect(t, token, nil)
 	waitTools(t, cs, "fake__echo")
 	call(t, cs, "fake__echo", map[string]any{"text": "before"})
@@ -579,7 +579,7 @@ func TestEndToEndRemovedUser(t *testing.T) {
 // the others.
 func TestEndToEndMissingUpstream(t *testing.T) {
 	e := newEnv(t, config.UpstreamConfig{Name: "broken", Command: "/nonexistent"})
-	cs := e.connect(t, e.login(t, "cozmin", 1), nil)
+	cs := e.connect(t, e.login(t, "alice", 1), nil)
 	names := waitTools(t, cs, "fake__echo")
 	for _, n := range names {
 		if strings.HasPrefix(n, "broken__") {
@@ -622,7 +622,7 @@ func TestEndToEndLateUpstream(t *testing.T) {
 	defer cancel()
 	cs, err := c.Connect(ctx, &mcp.StreamableClientTransport{
 		Endpoint:   e.cfg.ResourceURL(),
-		HTTPClient: &http.Client{Transport: bearer{e.login(t, "cozmin", 1), http.DefaultTransport}},
+		HTTPClient: &http.Client{Transport: bearer{e.login(t, "alice", 1), http.DefaultTransport}},
 		MaxRetries: -1,
 	}, nil)
 	if err != nil {
@@ -654,10 +654,10 @@ func TestEndToEndLateUpstream(t *testing.T) {
 // with that session's ID is refused by the SDK.
 func TestEndToEndSessionBoundToUser(t *testing.T) {
 	e := newEnv(t)
-	cozminToken := e.login(t, "cozmin", 1)
-	cozmin := e.connect(t, cozminToken, nil)
-	waitTools(t, cozmin, "fake__echo")
-	sid := cozmin.ID()
+	aliceToken := e.login(t, "alice", 1)
+	alice := e.connect(t, aliceToken, nil)
+	waitTools(t, alice, "fake__echo")
+	sid := alice.ID()
 	if sid == "" {
 		t.Fatal("no session ID")
 	}
@@ -676,14 +676,14 @@ func TestEndToEndSessionBoundToUser(t *testing.T) {
 	echo := `{"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"fake__echo","arguments":{"text":"hijack"}}}`
 	// Control: the same raw request with the owner's token is accepted, so
 	// the 403 below is about the user, not the request shape.
-	resp, rb := post(cozminToken, list)
-	expect(t, "cozmin using own session", resp, rb, http.StatusOK)
+	resp, rb := post(aliceToken, list)
+	expect(t, "alice using own session", resp, rb, http.StatusOK)
 	if !strings.Contains(rb, "fake__echo") {
 		t.Fatalf("control tools/list: %s", rb)
 	}
 	for _, body := range []string{list, echo} {
 		resp, rb := post(friendToken, body)
-		expect(t, "friend using cozmin's session", resp, rb, http.StatusForbidden)
+		expect(t, "friend using alice's session", resp, rb, http.StatusForbidden)
 		if strings.Contains(rb, "fake__echo") || strings.Contains(rb, "hijack") {
 			t.Fatalf("response leaks session data: %s", rb)
 		}
@@ -694,21 +694,21 @@ func TestEndToEndSessionBoundToUser(t *testing.T) {
 		}
 	}
 	// The owner's session still works.
-	if res := call(t, cozmin, "fake__echo", map[string]any{"text": "still mine"}); resultText(res) != "still mine" {
+	if res := call(t, alice, "fake__echo", map[string]any{"text": "still mine"}); resultText(res) != "still mine" {
 		t.Fatalf("echo %q", resultText(res))
 	}
 }
 
 func TestEndToEndWallet(t *testing.T) {
 	e := newEnv(t)
-	token := e.walletLogin(t, "cozmin")
+	token := e.walletLogin(t, "alice")
 	cs := e.connect(t, token, nil)
 	waitTools(t, cs, "fake__echo")
 	if res := call(t, cs, "fake__echo", map[string]any{"text": "hi"}); res.IsError || resultText(res) != "hi" {
 		t.Fatalf("echo: isError=%v %q", res.IsError, resultText(res))
 	}
 
-	want := identity.WalletUser(e.cozminWallet)
+	want := identity.WalletUser(e.aliceWallet)
 	var logged bool
 	for _, r := range e.logs.records("tool call") {
 		if r["tool"] == "fake__echo" {
@@ -726,12 +726,12 @@ func TestEndToEndWallet(t *testing.T) {
 	}
 }
 
-// A GitHub user and a wallet user that share the name "cozmin" are two
+// A GitHub user and a wallet user that share the name "alice" are two
 // users: separate audit identities, and resetting one leaves the other.
 func TestEndToEndSameNameDifferentUsers(t *testing.T) {
 	e := newEnv(t)
-	ghToken := e.login(t, "cozmin", 1)
-	walletToken := e.walletLogin(t, "cozmin")
+	ghToken := e.login(t, "alice", 1)
+	walletToken := e.walletLogin(t, "alice")
 	gh := e.connect(t, ghToken, nil)
 	wallet := e.connect(t, walletToken, nil)
 	waitTools(t, gh, "fake__echo")
@@ -739,13 +739,13 @@ func TestEndToEndSameNameDifferentUsers(t *testing.T) {
 	call(t, gh, "fake__echo", map[string]any{"text": "gh"})
 	call(t, wallet, "fake__echo", map[string]any{"text": "wallet"})
 
-	walletUID := identity.WalletUser(e.cozminWallet)
+	walletUID := identity.WalletUser(e.aliceWallet)
 	users := map[string]bool{}
 	for _, r := range e.logs.records("tool call") {
 		users[r["user"].(string)] = true
 	}
-	if len(users) != 2 || !users["github:cozmin"] || !users[walletUID] {
-		t.Fatalf("audit users %v, want github:cozmin and %s", users, walletUID)
+	if len(users) != 2 || !users["github:alice"] || !users[walletUID] {
+		t.Fatalf("audit users %v, want github:alice and %s", users, walletUID)
 	}
 
 	// What `users reset <wallet address>` does.

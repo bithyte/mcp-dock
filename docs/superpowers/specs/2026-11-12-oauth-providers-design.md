@@ -55,9 +55,9 @@ providers:
 
 allowed_users:
   github:
-    - cozmin-github-login
+    - alice-github-login
   open_payments:
-    - $ilp.interledger-test.dev/cozmin    # $ or https:// form, normalized at load
+    - $ilp.interledger-test.dev/alice    # $ or https:// form, normalized at load
 ```
 
 The owner already has the gateway's wallet address and key.

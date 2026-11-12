@@ -18,7 +18,7 @@ import (
 )
 
 const validYAML = `
-public_url: https://mcp.cozminu.com/
+public_url: https://mcp.example.com/
 data_dir: /var/lib/mcp-dock
 providers:
   github:
@@ -29,8 +29,8 @@ providers:
     key_id: key-1
     private_key_env: OP_PRIVATE_KEY
 allowed_users:
-  github: [Cozmin]
-  open_payments: ["$ilp.interledger-test.dev/cozmin"]
+  github: [Alice]
+  open_payments: ["$ilp.interledger-test.dev/alice"]
 upstreams:
   - name: jaypost
     command: jaypost
@@ -70,16 +70,16 @@ func TestLoadValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.AllowedUsers.OpenPayments[0] != "https://ilp.interledger-test.dev/cozmin" {
+	if c.AllowedUsers.OpenPayments[0] != "https://ilp.interledger-test.dev/alice" {
 		t.Fatalf("allowlist not normalized: %v", c.AllowedUsers.OpenPayments)
 	}
 	if c.Providers.OpenPayments.WalletAddress != "https://ilp.interledger-test.dev/mcp" || c.Providers.OpenPayments.PrivateKey != strings.TrimSpace(goodPEM) {
 		t.Fatalf("bad open_payments: %+v", c.Providers.OpenPayments)
 	}
-	if c.PublicURL != "https://mcp.cozminu.com" {
+	if c.PublicURL != "https://mcp.example.com" {
 		t.Fatalf("PublicURL = %q", c.PublicURL)
 	}
-	if c.ResourceURL() != "https://mcp.cozminu.com/mcp" {
+	if c.ResourceURL() != "https://mcp.example.com/mcp" {
 		t.Fatalf("ResourceURL = %q", c.ResourceURL())
 	}
 	if c.Listen != ":8080" {
@@ -93,14 +93,14 @@ func TestLoadRejects(t *testing.T) {
 		name, yaml, field string
 		env               map[string]string
 	}{
-		{"missing public_url", r("public_url: https://mcp.cozminu.com/\n", "").Replace(validYAML), "public_url", goodEnv},
-		{"public_url scheme", r("https://mcp.cozminu.com/", "ftp://x").Replace(validYAML), "public_url", goodEnv},
-		{"public_url path", r("https://mcp.cozminu.com/", "https://mcp.cozminu.com/dock").Replace(validYAML), "public_url", goodEnv},
-		{"public_url path trailing slash", r("https://mcp.cozminu.com/", "https://mcp.cozminu.com/dock/").Replace(validYAML), "public_url", goodEnv},
-		{"public_url query", r("https://mcp.cozminu.com/", "https://mcp.cozminu.com/?a=1").Replace(validYAML), "public_url", goodEnv},
-		{"public_url empty query", r("https://mcp.cozminu.com/", "https://mcp.cozminu.com?").Replace(validYAML), "public_url", goodEnv},
-		{"public_url fragment", r("https://mcp.cozminu.com/", "\"https://mcp.cozminu.com#x\"").Replace(validYAML), "public_url", goodEnv},
-		{"public_url empty fragment", r("https://mcp.cozminu.com/", "\"https://mcp.cozminu.com/#\"").Replace(validYAML), "public_url", goodEnv},
+		{"missing public_url", r("public_url: https://mcp.example.com/\n", "").Replace(validYAML), "public_url", goodEnv},
+		{"public_url scheme", r("https://mcp.example.com/", "ftp://x").Replace(validYAML), "public_url", goodEnv},
+		{"public_url path", r("https://mcp.example.com/", "https://mcp.example.com/dock").Replace(validYAML), "public_url", goodEnv},
+		{"public_url path trailing slash", r("https://mcp.example.com/", "https://mcp.example.com/dock/").Replace(validYAML), "public_url", goodEnv},
+		{"public_url query", r("https://mcp.example.com/", "https://mcp.example.com/?a=1").Replace(validYAML), "public_url", goodEnv},
+		{"public_url empty query", r("https://mcp.example.com/", "https://mcp.example.com?").Replace(validYAML), "public_url", goodEnv},
+		{"public_url fragment", r("https://mcp.example.com/", "\"https://mcp.example.com#x\"").Replace(validYAML), "public_url", goodEnv},
+		{"public_url empty fragment", r("https://mcp.example.com/", "\"https://mcp.example.com/#\"").Replace(validYAML), "public_url", goodEnv},
 		{"missing data_dir", r("data_dir: /var/lib/mcp-dock\n", "").Replace(validYAML), "data_dir", goodEnv},
 		{"missing client_id", r("client_id: Ov23liXXXXXXXXXXXXXX", "client_id: \"\"").Replace(validYAML), "client_id", goodEnv},
 		{"secret env empty", validYAML, "client_secret_env", map[string]string{"JAYPOST_TOKEN": "t"}},
@@ -134,7 +134,7 @@ func TestLoadRejects(t *testing.T) {
 		{"key env ecdsa", validYAML, "private_key_env", withKey(ecPEM(t))},
 		{"key env garbage", validYAML, "private_key_env", withKey("!!!notbase64!!!")},
 		{"key env base64 non pem", validYAML, "private_key_env", withKey(base64.StdEncoding.EncodeToString([]byte("hello")))},
-		{"allowed op http", r("$ilp.interledger-test.dev/cozmin", "http://w.example/a").Replace(validYAML), "allowed_users.open_payments", goodEnv},
+		{"allowed op http", r("$ilp.interledger-test.dev/alice", "http://w.example/a").Replace(validYAML), "allowed_users.open_payments", goodEnv},
 		{"allowed github without provider", r("  github:\n    client_id: Ov23liXXXXXXXXXXXXXX\n    client_secret_env: GITHUB_CLIENT_SECRET\n", "").Replace(validYAML), "allowed_users.github", goodEnv},
 		{"allowed op without provider", opOnlyWithGitHubAllow, "allowed_users.github", goodEnv},
 		{"allowed op without op provider", githubOnlyWithOPAllow, "allowed_users.open_payments", goodEnv},
@@ -155,19 +155,19 @@ func TestLoadRejects(t *testing.T) {
 
 func TestIsAllowed(t *testing.T) {
 	c := &Config{AllowedUsers: AllowedUsers{
-		GitHub:       []string{"Cozmin"},
-		OpenPayments: []string{"https://ilp.interledger-test.dev/cozmin"},
+		GitHub:       []string{"Alice"},
+		OpenPayments: []string{"https://ilp.interledger-test.dev/alice"},
 	}}
-	for _, id := range []string{"github:cozmin", "github:COZMIN", "open_payments:https://ilp.interledger-test.dev/cozmin"} {
+	for _, id := range []string{"github:alice", "github:ALICE", "open_payments:https://ilp.interledger-test.dev/alice"} {
 		if !c.IsAllowed(id) {
 			t.Fatalf("expected %q allowed", id)
 		}
 	}
 	for _, id := range []string{
-		"github:other", "cozmin", "open_payments:cozmin",
-		"open_payments:https://ilp.interledger-test.dev/Cozmin",
-		"github:https://ilp.interledger-test.dev/cozmin",
-		"open_payments:Cozmin", "",
+		"github:other", "alice", "open_payments:alice",
+		"open_payments:https://ilp.interledger-test.dev/Alice",
+		"github:https://ilp.interledger-test.dev/alice",
+		"open_payments:Alice", "",
 	} {
 		if c.IsAllowed(id) {
 			t.Fatalf("expected %q denied", id)
@@ -214,10 +214,10 @@ func TestLoadNormalizesPaddedKey(t *testing.T) {
 }
 
 func TestOldConfigShape(t *testing.T) {
-	old := "public_url: https://mcp.cozminu.com\ndata_dir: /d\n"
+	old := "public_url: https://mcp.example.com\ndata_dir: /d\n"
 	cases := map[string]struct{ yaml, want string }{
 		"github":        {old + "github:\n  client_id: x\n  client_secret_env: GITHUB_CLIENT_SECRET\nallowed_users:\n  github: [a]\n", "providers.github"},
-		"allowed_users": {old + "providers:\n  github:\n    client_id: x\n    client_secret_env: GITHUB_CLIENT_SECRET\nallowed_users: [cozmin]\n", "allowed_users.github"},
+		"allowed_users": {old + "providers:\n  github:\n    client_id: x\n    client_secret_env: GITHUB_CLIENT_SECRET\nallowed_users: [alice]\n", "allowed_users.github"},
 	}
 	for name, tc := range cases {
 		_, err := Load(write(t, tc.yaml), env(goodEnv))
@@ -235,7 +235,7 @@ func TestKeyErrorsDoNotLeakValue(t *testing.T) {
 	}
 }
 
-const head = "public_url: https://mcp.cozminu.com\ndata_dir: /d\n"
+const head = "public_url: https://mcp.example.com\ndata_dir: /d\n"
 const ghBlock = "  github:\n    client_id: x\n    client_secret_env: GITHUB_CLIENT_SECRET\n"
 const opBlock = "  open_payments:\n    wallet_address: https://ilp.example/mcp\n    key_id: k\n    private_key_env: OP_PRIVATE_KEY\n"
 
@@ -327,8 +327,8 @@ func TestAccepts(t *testing.T) {
 	r := strings.NewReplacer
 	for _, tc := range []struct{ name, yaml string }{
 		{"public_url root slash", validYAML},
-		{"public_url no slash", r("https://mcp.cozminu.com/", "https://mcp.cozminu.com").Replace(validYAML)},
-		{"public_url port", r("https://mcp.cozminu.com/", "http://127.0.0.1:8080/").Replace(validYAML)},
+		{"public_url no slash", r("https://mcp.example.com/", "https://mcp.example.com").Replace(validYAML)},
+		{"public_url port", r("https://mcp.example.com/", "http://127.0.0.1:8080/").Replace(validYAML)},
 		{"command bare", validYAML},
 		{"command absolute", r("command: jaypost", "command: /usr/local/bin/jaypost").Replace(validYAML)},
 	} {

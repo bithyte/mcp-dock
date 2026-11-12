@@ -53,11 +53,11 @@ func TestAuthRequestFlow(t *testing.T) {
 	if err := s.SaveAuthRequest(ctx, r); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetAuthRequestUser(ctx, "a1", identity.GitHubUser("Cozmin"), 7); err != nil {
+	if err := s.SetAuthRequestUser(ctx, "a1", identity.GitHubUser("Alice"), 7); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.GetAuthRequest(ctx, "a1")
-	if err != nil || got.Login != "github:cozmin" || got.GitHubID != 7 {
+	if err != nil || got.Login != "github:alice" || got.GitHubID != 7 {
 		t.Fatalf("%+v %v", got, err)
 	}
 	if err := s.DeleteAuthRequest(ctx, "a1"); err != nil {
@@ -102,7 +102,7 @@ func TestConsumeAuthRequestOnce(t *testing.T) {
 	if err := s.SaveAuthRequest(ctx, r); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetAuthRequestUser(ctx, "a1", identity.GitHubUser("Cozmin"), 7); err != nil {
+	if err := s.SetAuthRequestUser(ctx, "a1", identity.GitHubUser("Alice"), 7); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.ConsumeAuthRequest(ctx, "a1", now)
@@ -111,7 +111,7 @@ func TestConsumeAuthRequestOnce(t *testing.T) {
 	}
 	if got.ID != "a1" || got.ClientID != "c" || got.RedirectURI != "r" || got.ClientState != "st" ||
 		got.CodeChallenge != "ch" || got.Resource != "res" || got.Scope != "sc" ||
-		got.Login != "github:cozmin" || got.GitHubID != 7 {
+		got.Login != "github:alice" || got.GitHubID != 7 {
 		t.Fatalf("consumed %+v", got)
 	}
 	if _, err := s.ConsumeAuthRequest(ctx, "a1", now); !errors.Is(err, ErrNotFound) {
@@ -202,10 +202,10 @@ func TestConcurrentConsumeCode(t *testing.T) {
 func TestLoginCaseFolding(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()
-	if err := s.SetGitHubID(ctx, identity.GitHubUser("Cozmin"), 1); err != nil {
+	if err := s.SetGitHubID(ctx, identity.GitHubUser("Alice"), 1); err != nil {
 		t.Fatal(err)
 	}
-	id, ok, err := s.GitHubID(ctx, identity.GitHubUser("cozmin"))
+	id, ok, err := s.GitHubID(ctx, identity.GitHubUser("alice"))
 	if err != nil || !ok || id != 1 {
 		t.Fatalf("%d %v %v", id, ok, err)
 	}
@@ -331,10 +331,10 @@ func TestMigrateBareLogins(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	exec(`INSERT INTO users (login, github_id) VALUES ('Cozmin', 1), ('open_payments:https://w.example/Al', 2)`)
-	exec(`INSERT INTO consents (login, client_id, redirect_uri) VALUES ('Cozmin', 'c', 'r')`)
-	exec(`INSERT INTO tokens (hash, kind, client_id, login, resource, scope, expires_at) VALUES ('t1','access','c','cozmin','','',1), ('t2','access','c','Cozmin','','',1)`)
-	exec(`INSERT INTO codes (hash, client_id, redirect_uri, code_challenge, resource, scope, login, expires_at) VALUES ('c1','c','r','','','','Cozmin',1), ('c2','c','r','','','','cozmin',1)`)
+	exec(`INSERT INTO users (login, github_id) VALUES ('Alice', 1), ('open_payments:https://w.example/Al', 2)`)
+	exec(`INSERT INTO consents (login, client_id, redirect_uri) VALUES ('Alice', 'c', 'r')`)
+	exec(`INSERT INTO tokens (hash, kind, client_id, login, resource, scope, expires_at) VALUES ('t1','access','c','alice','','',1), ('t2','access','c','Alice','','',1)`)
+	exec(`INSERT INTO codes (hash, client_id, redirect_uri, code_challenge, resource, scope, login, expires_at) VALUES ('c1','c','r','','','','Alice',1), ('c2','c','r','','','','alice',1)`)
 	exec(`INSERT INTO auth_requests (id, client_id, redirect_uri, client_state, code_challenge, resource, scope, login, github_id, expires_at) VALUES ('a1','c','r','','','','','',0,1)`)
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -348,10 +348,10 @@ func TestMigrateBareLogins(t *testing.T) {
 		}
 		defer s2.Close()
 		for table, want := range map[string][]string{
-			"users":         {"github:cozmin", "open_payments:https://w.example/Al"},
-			"consents":      {"github:cozmin"},
-			"tokens":        {"github:cozmin", "github:cozmin"},
-			"codes":         {"github:cozmin", "github:cozmin"},
+			"users":         {"github:alice", "open_payments:https://w.example/Al"},
+			"consents":      {"github:alice"},
+			"tokens":        {"github:alice", "github:alice"},
+			"codes":         {"github:alice", "github:alice"},
 			"auth_requests": {""},
 		} {
 			rows, err := s2.db.QueryContext(ctx, "SELECT login FROM "+table+" ORDER BY rowid")
@@ -379,7 +379,7 @@ func TestMigrateBareLogins(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s3.Close()
-	if id, ok, err := s3.GitHubID(ctx, "github:cozmin"); err != nil || !ok || id != 1 {
+	if id, ok, err := s3.GitHubID(ctx, "github:alice"); err != nil || !ok || id != 1 {
 		t.Fatalf("GitHubID after rename = %d, %v, %v; want 1", id, ok, err)
 	}
 }

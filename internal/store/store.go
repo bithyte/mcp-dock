@@ -116,7 +116,7 @@ func migratePendingColumn(db *sql.DB) error {
 }
 
 // migrateBareLogins rewrites logins stored before ids were provider
-// prefixed ("Cozmin") to "github:cozmin". Rows that already contain a colon
+// prefixed ("Alice") to "github:alice". Rows that already contain a colon
 // and the empty login of a not yet signed-in auth request are left alone, so
 // it is safe to run on every Open.
 func migrateBareLogins(db *sql.DB) error {
