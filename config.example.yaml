@@ -15,10 +15,10 @@ providers:
 
 allowed_users:
   github:
-    - cozmin-github-login
+    - alice-github-login
     - friend-login
   open_payments:
-    - $ilp.interledger-test.dev/cozmin
+    - $ilp.interledger-test.dev/alice
 
 upstreams:
   - name: jaypost
