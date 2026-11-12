@@ -73,8 +73,10 @@ func (s *Store) GetAuthRequest(ctx context.Context, id string) (*AuthRequest, er
 	return &r, nil
 }
 
+// SetAuthRequestUser records who logged in. Only the first login on a
+// request sticks; later calls, like a missing request, get ErrNotFound.
 func (s *Store) SetAuthRequestUser(ctx context.Context, id, userID string, githubID int64) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE auth_requests SET login=?, github_id=? WHERE id=?`, userID, githubID, id)
+	res, err := s.db.ExecContext(ctx, `UPDATE auth_requests SET login=?, github_id=? WHERE id=? AND login=''`, userID, githubID, id)
 	if err != nil {
 		return err
 	}

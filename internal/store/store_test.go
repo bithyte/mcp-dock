@@ -72,6 +72,27 @@ func TestAuthRequestFlow(t *testing.T) {
 	}
 }
 
+// Only the first login sticks: two provider callbacks racing on one auth
+// request can't both set a user.
+func TestSetAuthRequestUserOnce(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	saveReq(t, s, "a", time.Now().Add(time.Hour))
+	if err := s.SetAuthRequestUser(ctx, "a", "open_payments:https://w.example/alice", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAuthRequestUser(ctx, "a", "github:x", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second set err = %v, want ErrNotFound", err)
+	}
+	got, err := s.GetAuthRequest(ctx, "a")
+	if err != nil || got.Login != "open_payments:https://w.example/alice" || got.GitHubID != 0 {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if err := s.SetAuthRequestUser(ctx, "missing", "github:x", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing: %v, want ErrNotFound", err)
+	}
+}
+
 func TestConsumeAuthRequestOnce(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()

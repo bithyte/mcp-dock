@@ -265,7 +265,13 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 // consent page shows (GitHub keeps the login's original casing). githubID is
 // stored on the auth request (0 for providers without one).
 func (s *Server) afterLogin(w http.ResponseWriter, r *http.Request, ar *store.AuthRequest, userID, displayName string, githubID int64) {
-	if err := s.store.SetAuthRequestUser(r.Context(), ar.ID, userID, githubID); err != nil {
+	err := s.store.SetAuthRequestUser(r.Context(), ar.ID, userID, githubID)
+	if errors.Is(err, store.ErrNotFound) {
+		// Gone, or another login on this request got there first.
+		s.badLink(w)
+		return
+	}
+	if err != nil {
 		s.serverError(w, "auth request update failed", err)
 		return
 	}

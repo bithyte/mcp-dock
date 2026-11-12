@@ -368,6 +368,68 @@ func TestWalletIDDiffers(t *testing.T) {
 	authRequestGone(t, srv, reqID)
 }
 
+// A wallet document may not claim an id on another origin, even an
+// allowlisted one: its authServer would then vouch for a wallet it doesn't
+// host.
+func TestWalletIDOtherOrigin(t *testing.T) {
+	srv, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
+	const victim = "https://other.example/cozmin"
+	srv.cfg.AllowedUsers.OpenPayments = append(srv.cfg.AllowedUsers.OpenPayments, victim)
+	for _, id := range []string{victim, strings.Replace(fop.Wallet("cozmin"), "127.0.0.1", "localhost", 1)} {
+		if id != victim {
+			srv.cfg.AllowedUsers.OpenPayments = append(srv.cfg.AllowedUsers.OpenPayments, id)
+		}
+		fop.SetWalletID("cozmin", id)
+		c := newBrowser(t)
+		reqID, _ := signinPage(t, c, ts, registerClient(t, ts, claudeRedirect))
+		resp, body := submitWallet(t, c, ts, reqID, fop.Wallet("cozmin"))
+		checkHTMLError(t, resp, http.StatusForbidden)
+		if !strings.Contains(body, "Open Payments wallet address") {
+			t.Errorf("%s: body %s", id, body)
+		}
+		if hasRequest(fop, "POST /auth") {
+			t.Fatalf("%s: grant requested: %v", id, fop.Requests())
+		}
+		authRequestGone(t, srv, reqID)
+	}
+}
+
+// The id may differ from the typed address in path only (same origin), if
+// it is allowlisted too.
+func TestWalletIDSameOriginOtherPath(t *testing.T) {
+	_, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin", "cozmin2"}, false)
+	fop.SetWalletID("cozmin", fop.Wallet("cozmin2"))
+	c := newBrowser(t)
+	resp, body := walletLogin(t, c, ts, fop, registerClient(t, ts, claudeRedirect), "cozmin")
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Signed in with Open Payments as <strong>"+fop.Wallet("cozmin2")+"</strong>") {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+}
+
+// afterLogin on a request that already has a user is a stale link, and the
+// first user stays.
+func TestAfterLoginOnce(t *testing.T) {
+	srv, ts, _, fop := newTestServerOP(t, []string{"cozmin"}, []string{"cozmin"}, true)
+	c := newBrowser(t)
+	_, body := walletLogin(t, c, ts, fop, registerClient(t, ts, claudeRedirect), "cozmin")
+	ctx := context.Background()
+	ar, err := srv.store.GetAuthRequest(ctx, consentRequestID(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := *ar
+	stale.Login = ""
+	w := httptest.NewRecorder()
+	srv.afterLogin(w, httptest.NewRequest(http.MethodGet, "/oauth/github/callback", nil), &stale, "github:cozmin", "cozmin", 1)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "Login link expired") {
+		t.Fatalf("second login: status %d: %s", w.Code, w.Body)
+	}
+	got, err := srv.store.GetAuthRequest(ctx, ar.ID)
+	if err != nil || got.Login != "open_payments:"+fop.Wallet("cozmin") || got.GitHubID != 0 {
+		t.Fatalf("%+v %v", got, err)
+	}
+}
+
 func TestWalletDeclined(t *testing.T) {
 	srv, ts, _, fop := newTestServerOP(t, nil, []string{"cozmin"}, false)
 	fop.SetDecline(true)

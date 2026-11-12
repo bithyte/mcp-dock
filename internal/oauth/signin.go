@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 
 	"github.com/bithyte/mcp-dock/internal/identity"
 	"github.com/bithyte/mcp-dock/internal/oplogin"
@@ -112,15 +113,26 @@ func (s *Server) handleOPStart(w http.ResponseWriter, r *http.Request) {
 		s.resignin(w, r, ar, http.StatusBadGateway, typed, walletUnreachable)
 		return
 	}
+	// The id must be allowlisted too, and on the typed address's origin:
+	// otherwise a wallet host could claim another host's wallet as its id
+	// and have an auth server it controls vouch for it.
 	idAddr, err := identity.NormalizeWalletAddress(wallet.ID)
-	if err != nil || !s.cfg.IsAllowed(identity.WalletUser(idAddr)) {
-		s.log.Warn("open payments wallet id not on allowlist", "wallet", addr, "wallet_id", wallet.ID)
+	if err != nil {
+		s.log.Warn("open payments wallet id invalid", "wallet", addr, "wallet_id", wallet.ID)
 		s.abandon(w, r, ar)
-		if err != nil {
-			s.notAllowed(w, uid)
-		} else {
-			s.notAllowed(w, identity.WalletUser(idAddr))
-		}
+		s.notAllowed(w, uid)
+		return
+	}
+	if !sameOrigin(addr, idAddr) {
+		s.log.Warn("open payments wallet id on another origin", "wallet", addr, "wallet_id", idAddr)
+		s.abandon(w, r, ar)
+		s.notAllowed(w, identity.WalletUser(idAddr))
+		return
+	}
+	if !s.cfg.IsAllowed(identity.WalletUser(idAddr)) {
+		s.log.Warn("open payments wallet id not on allowlist", "wallet", addr, "wallet_id", idAddr)
+		s.abandon(w, r, ar)
+		s.notAllowed(w, identity.WalletUser(idAddr))
 		return
 	}
 
@@ -230,4 +242,18 @@ func (s *Server) handleOPCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("open payments login verified", "wallet", wallet)
 	s.afterLogin(w, r, ar, uid, wallet, 0)
+}
+
+// sameOrigin reports whether two normalized wallet addresses share scheme,
+// host and port. Normalization already lowercased them and dropped :443.
+func sameOrigin(a, b string) bool {
+	ua, err := url.Parse(a)
+	if err != nil {
+		return false
+	}
+	ub, err := url.Parse(b)
+	if err != nil {
+		return false
+	}
+	return ua.Scheme == ub.Scheme && ua.Host == ub.Host
 }
