@@ -21,10 +21,22 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/net/http/httpguts"
+
+	"github.com/bithyte/mcp-dock/internal/identity"
 )
 
 // ErrUnavailable is returned by Call while the upstream is down.
 var ErrUnavailable = errors.New("upstream unavailable")
+
+// Caller identity sent with every tools/call. The value under UserMetaKey
+// in params._meta is {"provider": ..., "id": ...}; the headers carry the
+// same two values on the POST for that call.
+const (
+	UserMetaKey        = "io.github.bithyte.mcp-dock/user"
+	HeaderUserProvider = "X-MCP-Dock-User-Provider"
+	HeaderUserID       = "X-MCP-Dock-User-Id"
+)
 
 const (
 	defaultMinBackoff = time.Second
@@ -86,17 +98,25 @@ type Upstream struct {
 	tokenSeq atomic.Uint64
 }
 
-// headerTransport adds the upstream's auth header to every request.
+// headerTransport adds the upstream's auth header to every request, and the
+// identity headers to requests made under a call's ctx.
 type headerTransport struct {
 	base   http.RoundTripper
 	bearer string
 }
 
 func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if t.bearer != "" {
+	who, _ := req.Context().Value(callerKey{}).(*caller)
+	if t.bearer != "" || who != nil {
 		// A RoundTripper must not modify the caller's request.
 		req = req.Clone(req.Context())
-		req.Header.Set("Authorization", "Bearer "+t.bearer)
+		if t.bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+t.bearer)
+		}
+		if who != nil {
+			req.Header.Set(HeaderUserProvider, who.provider)
+			req.Header.Set(HeaderUserID, who.id)
+		}
 	}
 	a, _ := req.Context().Value(attemptKey{}).(*attempt)
 	resp, err := t.base.RoundTrip(req)
@@ -112,6 +132,25 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 type attempt struct{ reached atomic.Bool }
 
 type attemptKey struct{}
+
+// caller is the identity for the headers of one call's requests. The SDK
+// sends a call's POST with the call's ctx, so Call puts it there, and a
+// retry on the next session uses the same ctx.
+type caller struct{ provider, id string }
+
+type callerKey struct{}
+
+// withCaller returns ctx carrying user's identity for the headers. It
+// returns ctx unchanged when user has no valid identity, or when either
+// value isn't a valid header value (net/http would fail the request); the
+// identity still goes in _meta then.
+func withCaller(ctx context.Context, user string) context.Context {
+	p, id, ok := identity.Split(user)
+	if !ok || !httpguts.ValidHeaderFieldValue(string(p)) || !httpguts.ValidHeaderFieldValue(id) {
+		return ctx
+	}
+	return context.WithValue(ctx, callerKey{}, &caller{provider: string(p), id: id})
+}
 
 // wrapClient returns a copy of base (or a default client) whose transport
 // adds the upstream's headers.
@@ -192,31 +231,32 @@ func (u *Upstream) Tools() []*mcp.Tool {
 	return slices.Clone(u.tools)
 }
 
-// Call invokes tool on the upstream. If onProgress is non-nil, progress
-// notifications for this call are passed to it; it runs on the session's
-// receive loop and must not block. Returns ErrUnavailable while down, and
+// Call invokes tool on the upstream as user, a provider-prefixed id such as
+// "github:alice" from the Dock's authenticated session ("" or "-" for none).
+// A valid identity is sent as params._meta[UserMetaKey] and in the
+// HeaderUserProvider and HeaderUserID headers. If onProgress is non-nil,
+// progress notifications for this call are passed to it; it runs on the
+// session's receive loop and must not block. Returns ErrUnavailable while down, and
 // ctx.Err() if ctx ends first (the SDK sends notifications/cancelled).
 //
 // A call is retried once, on the next session, only if its POST got a 404
 // for the session id: the runner answers that before handing the request to
 // a child, so the call can't have run. Any other failure isn't retried,
 // since the call may have had effects.
-func (u *Upstream) Call(ctx context.Context, tool string, args json.RawMessage,
+func (u *Upstream) Call(ctx context.Context, user string, tool string, args json.RawMessage,
 	onProgress func(*mcp.ProgressNotificationParams)) (*mcp.CallToolResult, error) {
 	c, _, _ := u.current()
 	if c.s == nil {
 		return nil, ErrUnavailable
 	}
-	params := &mcp.CallToolParams{Name: tool}
-	if len(args) > 0 {
-		params.Arguments = args
-	}
+	var token string
 	if onProgress != nil {
-		token := fmt.Sprintf("%s-%d", u.opts.Name, u.tokenSeq.Add(1))
-		params.SetProgressToken(token)
+		token = fmt.Sprintf("%s-%d", u.opts.Name, u.tokenSeq.Add(1))
 		u.progress.Store(token, onProgress)
 		defer u.progress.Delete(token)
 	}
+	params := callParams(tool, args, user, token)
+	ctx = withCaller(ctx, user)
 	res, retry, err := u.callOn(ctx, c, params)
 	if !retry {
 		return res, err
@@ -234,6 +274,25 @@ func (u *Upstream) Call(ctx context.Context, tool string, args json.RawMessage,
 	}
 	res, _, err = u.callOn(ctx, next, params)
 	return res, err
+}
+
+// callParams builds the upstream params for a call. The Dock builds _meta
+// itself: the progress token (none if progressToken is "") and user's
+// identity (none if identity.Split rejects user). Nothing from the client's
+// _meta is ever passed in.
+func callParams(tool string, args json.RawMessage, user, progressToken string) *mcp.CallToolParams {
+	params := &mcp.CallToolParams{Name: tool}
+	if len(args) > 0 {
+		params.Arguments = args
+	}
+	if p, id, ok := identity.Split(user); ok {
+		params.Meta = mcp.Meta{UserMetaKey: map[string]any{"provider": string(p), "id": id}}
+	}
+	if progressToken != "" {
+		// Adds to params.Meta, keeping the identity.
+		params.SetProgressToken(progressToken)
+	}
+	return params
 }
 
 // callOn makes one attempt on c and reports whether it's safe to retry on

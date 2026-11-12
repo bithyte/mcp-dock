@@ -152,6 +152,24 @@ Users are separate per provider. GitHub login `alice` is user `github:alice`; wa
 
 Wallet login checks, in order: the typed address must be on the allowlist before the gateway makes any request to it (so it never fetches a URL a stranger typed); the `id` in the wallet's own document must be on the allowlist too, and have the same scheme, host and port as what was typed; and the address is checked once more after the wallet provider finalizes the grant.
 
+## Caller identity
+
+Every `tools/call` the gateway sends to an upstream says who the signed-in user is. It's in `params._meta`:
+
+```json
+"io.github.bithyte.mcp-dock/user": {"provider": "github", "id": "octocat"}
+```
+
+`provider` is `github` or `open_payments`. For GitHub, `id` is the login, lowercased. For Open Payments, it's the normalized wallet address, e.g. `{"provider": "open_payments", "id": "https://wallet.example/alice"}`. `_meta` reaches stdio servers behind mcp-runner unchanged, so that's the field to read.
+
+The same two values are also sent as HTTP headers on the POST carrying the call, `X-MCP-Dock-User-Provider` and `X-MCP-Dock-User-Id`, for HTTP-native upstreams that can't read `_meta`. mcp-runner ignores them. If a value isn't a valid HTTP header value, the headers are left out for that call and only `_meta` carries the identity. Other requests (initialize, tools/list, pings) carry no identity, since the session is shared by all users.
+
+The gateway always sets these from the authenticated session. It never forwards a client's `_meta`, so a client can't claim to be someone else by sending the key itself. With no signed-in user there's no key and no headers.
+
+An upstream can only trust these values because it trusts the gateway: keep it reachable only from the gateway (network isolation) or require a runner bearer token. Anyone who can reach the upstream directly can send any identity they like.
+
+The gateway pings each upstream every 30s (10s timeout), and through mcp-runner that ping goes to the child. A child that handles requests one at a time and spends more than 10s on a call will miss the ping, and the gateway will reset that upstream's session.
+
 ## Environment variables
 
 - `GITHUB_CLIENT_SECRET` (or whatever `providers.github.client_secret_env` names): GitHub OAuth App secret.

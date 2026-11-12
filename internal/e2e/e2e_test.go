@@ -36,6 +36,7 @@ import (
 	"github.com/bithyte/mcp-dock/internal/runner"
 	"github.com/bithyte/mcp-dock/internal/store"
 	"github.com/bithyte/mcp-dock/internal/testutil"
+	"github.com/bithyte/mcp-dock/internal/upstream"
 )
 
 func TestMain(m *testing.M) {
@@ -933,5 +934,42 @@ func TestEndToEndRunnerRestart(t *testing.T) {
 	// a second or more), so it went through the retry.
 	if !slices.ContainsFunc(e.logs.records("upstream session missing, retrying call"), func(r map[string]any) bool { return r["upstream"] == "rr" }) {
 		t.Fatalf("echo didn't go through the retry:\n%s", e.logs)
+	}
+}
+
+// Each user's calls carry their own identity to the upstream, and a client
+// can't set it through _meta.
+func TestEndToEndIdentity(t *testing.T) {
+	e := newEnv(t)
+	gh := e.connect(t, e.login(t, "Alice", 1), nil)
+	wallet := e.connect(t, e.walletLogin(t, "alice"), nil)
+	waitTools(t, gh, "fake__whoami")
+	waitTools(t, wallet, "fake__whoami")
+
+	who := func(provider, id string) string {
+		b, err := json.Marshal(map[string]string{"provider": provider, "id": id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	if got, want := resultText(call(t, gh, "fake__whoami", map[string]any{})), who("github", "alice"); got != want {
+		t.Fatalf("github whoami = %s, want %s", got, want)
+	}
+	if got, want := resultText(call(t, wallet, "fake__whoami", map[string]any{})), who("open_payments", e.aliceWallet); got != want {
+		t.Fatalf("wallet whoami = %s, want %s", got, want)
+	}
+
+	spoof := &mcp.CallToolParams{
+		Name:      "fake__whoami",
+		Arguments: map[string]any{},
+		Meta:      mcp.Meta{upstream.UserMetaKey: map[string]any{"provider": "github", "id": "mallory"}},
+	}
+	res, err := wallet.CallTool(context.Background(), spoof)
+	if err != nil {
+		t.Fatalf("spoofed call: %v", err)
+	}
+	if got, want := resultText(res), who("open_payments", e.aliceWallet); got != want {
+		t.Fatalf("spoofed whoami = %s, want %s", got, want)
 	}
 }

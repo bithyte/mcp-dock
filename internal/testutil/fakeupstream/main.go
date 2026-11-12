@@ -1,6 +1,7 @@
 // Command fakeupstream is a stdio MCP server used by tests.
 //
-// Tools: echo, sleep, crash, getenv, cwd, notify, add_tool (registers "late").
+// Tools: echo, sleep, crash, getenv, cwd, notify, add_tool (registers "late"),
+// whoami (the JSON of params._meta[upstream.UserMetaKey], or <none>).
 // Env:
 //
 //	FAKE_CANCEL_FILE  sleep writes "cancelled" here when its context is cancelled
@@ -12,12 +13,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/bithyte/mcp-dock/internal/upstream"
 )
 
 // longToolName is 70 characters, too long once prefixed by the gateway.
@@ -137,6 +141,19 @@ func main() {
 					return text("late"), nil, nil
 				})
 			return text("added"), nil, nil
+		})
+
+	mcp.AddTool(s, &mcp.Tool{Name: "whoami", Description: "returns the caller identity from _meta"},
+		func(_ context.Context, req *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, any, error) {
+			v, ok := req.Params.Meta[upstream.UserMetaKey]
+			if !ok {
+				return text("<none>"), nil, nil
+			}
+			b, err := json.Marshal(v)
+			if err != nil {
+				return nil, nil, err
+			}
+			return text(string(b)), nil, nil
 		})
 
 	if os.Getenv("FAKE_LONG_TOOL") == "1" {

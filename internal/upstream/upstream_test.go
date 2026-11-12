@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -185,7 +186,7 @@ func call(t *testing.T, u *Upstream, tool, args string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	res, err := u.Call(ctx, tool, json.RawMessage(args), nil)
+	res, err := u.Call(ctx, "", tool, json.RawMessage(args), nil)
 	if err != nil {
 		t.Fatalf("Call(%s): %v", tool, err)
 	}
@@ -201,7 +202,7 @@ func TestStartListsTools(t *testing.T) {
 		t.Fatalf("Name() = %q", h.u.Name())
 	}
 	h.waitUp(t)
-	for _, name := range []string{"echo", "sleep", "crash", "getenv", "cwd", "notify", "add_tool"} {
+	for _, name := range []string{"echo", "sleep", "crash", "getenv", "cwd", "notify", "add_tool", "whoami"} {
 		if !h.hasTool(name) {
 			t.Errorf("tool %q missing", name)
 		}
@@ -223,7 +224,7 @@ func TestProgressForwarded(t *testing.T) {
 	var n atomic.Int32
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	res, err := h.u.Call(ctx, "sleep", json.RawMessage(`{"ms":300}`), func(p *mcp.ProgressNotificationParams) {
+	res, err := h.u.Call(ctx, "", "sleep", json.RawMessage(`{"ms":300}`), func(p *mcp.ProgressNotificationParams) {
 		n.Add(1)
 	})
 	if err != nil {
@@ -245,7 +246,7 @@ func TestCancelPropagates(t *testing.T) {
 	defer cancel()
 	time.AfterFunc(100*time.Millisecond, cancel)
 	begin := time.Now()
-	_, err := h.u.Call(ctx, "sleep", json.RawMessage(`{"ms":5000}`), nil)
+	_, err := h.u.Call(ctx, "", "sleep", json.RawMessage(`{"ms":5000}`), nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
@@ -267,7 +268,7 @@ func TestRPCErrorNotUnavailable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// Unknown tool: the upstream answers with a JSON-RPC error and stays up.
-	_, err := h.u.Call(ctx, "no_such_tool", json.RawMessage(`{}`), nil)
+	_, err := h.u.Call(ctx, "", "no_such_tool", json.RawMessage(`{}`), nil)
 	if err == nil {
 		t.Fatal("unknown tool returned no error")
 	}
@@ -289,7 +290,7 @@ func TestCallsNotSerialized(t *testing.T) {
 	slowDone := make(chan struct{})
 	go func() {
 		defer close(slowDone)
-		_, _ = h.u.Call(ctx, "sleep", json.RawMessage(`{"ms":10000}`), func(*mcp.ProgressNotificationParams) {
+		_, _ = h.u.Call(ctx, "", "sleep", json.RawMessage(`{"ms":10000}`), func(*mcp.ProgressNotificationParams) {
 			once.Do(func() { close(inFlight) })
 		})
 	}()
@@ -319,7 +320,7 @@ func TestShutdownWithInFlightCall(t *testing.T) {
 	callErr := make(chan error, 1)
 	go func() {
 		// Background ctx: nothing but shutdown can end this call.
-		_, err := h.u.Call(context.Background(), "sleep", json.RawMessage(`{"ms":60000}`), func(*mcp.ProgressNotificationParams) {
+		_, err := h.u.Call(context.Background(), "", "sleep", json.RawMessage(`{"ms":60000}`), func(*mcp.ProgressNotificationParams) {
 			once.Do(func() { close(inFlight) })
 		})
 		callErr <- err
@@ -356,7 +357,7 @@ func TestCrashRestarts(t *testing.T) {
 	// terminated without response"), not an answer from the upstream. It
 	// isn't mapped to ErrUnavailable: the session hasn't been seen to end
 	// yet, and the call may have had effects, so it's not retried either.
-	res, err := h.u.Call(ctx, "crash", json.RawMessage(`{}`), nil)
+	res, err := h.u.Call(ctx, "", "crash", json.RawMessage(`{}`), nil)
 	if err == nil {
 		t.Fatalf("crash call returned %+v, want an error", res)
 	}
@@ -401,7 +402,7 @@ func TestUnreachableRetries(t *testing.T) {
 	if h.u.Tools() != nil {
 		t.Fatal("Tools() non-nil for unreachable upstream")
 	}
-	_, err = h.u.Call(context.Background(), "echo", json.RawMessage(`{"text":"x"}`), nil)
+	_, err = h.u.Call(context.Background(), "", "echo", json.RawMessage(`{"text":"x"}`), nil)
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("err = %v, want ErrUnavailable", err)
 	}
@@ -634,7 +635,7 @@ func TestNoRetryAfterSend(t *testing.T) {
 	before := h.changeCount()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if res, err := h.u.Call(ctx, "crash", json.RawMessage(`{}`), nil); err == nil {
+	if res, err := h.u.Call(ctx, "", "crash", json.RawMessage(`{}`), nil); err == nil {
 		t.Fatalf("crash call returned %+v, want an error", res)
 	}
 	eventually(t, 10*time.Second, "down after crash", func() bool { return h.sawDownAfter(before) })
@@ -666,7 +667,7 @@ func TestNoRetryInFlightOnSessionMissing(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, err := h.u.Call(ctx, "sleep", json.RawMessage(`{"ms":1500}`), nil)
+		_, err := h.u.Call(ctx, "", "sleep", json.RawMessage(`{"ms":1500}`), nil)
 		slowErr <- err
 	}()
 	// No GET stream, so no progress either (the runner relays child
@@ -696,5 +697,206 @@ func TestNoRetryInFlightOnSessionMissing(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("sleep ran %d times, want 1 (log %v)", n, readLines(t, log))
+	}
+}
+
+// callAs is call with a user.
+func callAs(t *testing.T, u *Upstream, user, tool, args string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res, err := u.Call(ctx, user, tool, json.RawMessage(args), nil)
+	if err != nil {
+		t.Fatalf("Call(%s as %q): %v", tool, user, err)
+	}
+	if res.IsError {
+		t.Fatalf("Call(%s as %q) returned tool error: %+v", tool, user, res.Content)
+	}
+	return textOf(t, res)
+}
+
+func TestIdentityMeta(t *testing.T) {
+	h := start(t, nil)
+	h.waitUp(t)
+	if got := callAs(t, h.u, "github:alice", "whoami", `{}`); got != `{"id":"alice","provider":"github"}` {
+		t.Fatalf("whoami as github:alice = %s", got)
+	}
+	want := `{"id":"https://wallet.example/alice","provider":"open_payments"}`
+	if got := callAs(t, h.u, "open_payments:https://wallet.example/alice", "whoami", `{}`); got != want {
+		t.Fatalf("whoami as wallet = %s, want %s", got, want)
+	}
+}
+
+// reqHeaders is what a headerRecorder saw for one POST.
+type reqHeaders struct {
+	method   string // JSON-RPC method, "" if the body has none
+	session  string
+	provider string
+	id       string
+	has      bool // either identity header present
+}
+
+// headerRecorder is a runner Wrap that records the identity headers of
+// every POST along with its JSON-RPC method.
+type headerRecorder struct {
+	mu   sync.Mutex
+	reqs []reqHeaders
+}
+
+func (r *headerRecorder) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodPost {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			req.Body = io.NopCloser(bytes.NewReader(body))
+			var msg struct {
+				Method string `json:"method"`
+			}
+			_ = json.Unmarshal(body, &msg)
+			_, hp := req.Header[http.CanonicalHeaderKey(HeaderUserProvider)]
+			_, hi := req.Header[http.CanonicalHeaderKey(HeaderUserID)]
+			r.mu.Lock()
+			r.reqs = append(r.reqs, reqHeaders{
+				method:   msg.Method,
+				session:  req.Header.Get("Mcp-Session-Id"),
+				provider: req.Header.Get(HeaderUserProvider),
+				id:       req.Header.Get(HeaderUserID),
+				has:      hp || hi,
+			})
+			r.mu.Unlock()
+		}
+		next.ServeHTTP(w, req)
+	})
+}
+
+func (r *headerRecorder) byMethod(m string) []reqHeaders {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []reqHeaders
+	for _, x := range r.reqs {
+		if x.method == m {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+func TestIdentityHeaders(t *testing.T) {
+	rec := &headerRecorder{}
+	h := startWith(t, testutil.RunnerOptions{Wrap: rec.wrap}, nil)
+	h.waitUp(t)
+	callAs(t, h.u, "github:alice", "whoami", `{}`)
+	calls := rec.byMethod("tools/call")
+	if len(calls) != 1 {
+		t.Fatalf("%d tools/call POSTs, want 1", len(calls))
+	}
+	if calls[0].provider != "github" || calls[0].id != "alice" {
+		t.Fatalf("tools/call headers provider=%q id=%q, want github alice", calls[0].provider, calls[0].id)
+	}
+	for _, m := range []string{"initialize", "tools/list"} {
+		rs := rec.byMethod(m)
+		if len(rs) == 0 {
+			t.Fatalf("no %s POST recorded", m)
+		}
+		for _, r := range rs {
+			if r.has {
+				t.Fatalf("%s POST carries identity headers: %+v", m, r)
+			}
+		}
+	}
+}
+
+// The retried POST carries the same identity as the first one.
+func TestIdentityHeadersOnRetry(t *testing.T) {
+	x := newExpirer()
+	rec := &headerRecorder{}
+	h := startWith(t, testutil.RunnerOptions{Wrap: func(next http.Handler) http.Handler { return rec.wrap(x.wrap(next)) }},
+		func(o *Options) { o.PingInterval = time.Hour })
+	h.waitUp(t)
+	x.expire.Store(true)
+	if got := callAs(t, h.u, "github:alice", "whoami", `{}`); got != `{"id":"alice","provider":"github"}` {
+		t.Fatalf("whoami after retry = %s", got)
+	}
+	calls := rec.byMethod("tools/call")
+	if len(calls) != 2 || calls[0].session == calls[1].session {
+		t.Fatalf("tools/call POSTs %+v, want 2 on different sessions", calls)
+	}
+	for i, c := range calls {
+		if c.provider != "github" || c.id != "alice" {
+			t.Fatalf("tools/call %d headers provider=%q id=%q, want github alice", i, c.provider, c.id)
+		}
+	}
+}
+
+func TestNoIdentity(t *testing.T) {
+	rec := &headerRecorder{}
+	h := startWith(t, testutil.RunnerOptions{Wrap: rec.wrap}, nil)
+	h.waitUp(t)
+	for _, user := range []string{"", "-", "alice", "unknown:alice", "github:"} {
+		if got := callAs(t, h.u, user, "whoami", `{}`); got != "<none>" {
+			t.Fatalf("whoami as %q = %s, want <none>", user, got)
+		}
+	}
+	calls := rec.byMethod("tools/call")
+	if len(calls) != 5 {
+		t.Fatalf("%d tools/call POSTs, want 5", len(calls))
+	}
+	for i, c := range calls {
+		if c.has {
+			t.Fatalf("tools/call %d carries identity headers: %+v", i, c)
+		}
+	}
+}
+
+// An id that isn't a valid header value still goes in _meta, but no
+// identity headers are sent and the call works.
+func TestIdentityUnsafeHeaderValue(t *testing.T) {
+	rec := &headerRecorder{}
+	h := startWith(t, testutil.RunnerOptions{Wrap: rec.wrap}, nil)
+	h.waitUp(t)
+	user := "github:alice\r\nX-Evil: 1"
+	want := `{"id":"alice\r\nX-Evil: 1","provider":"github"}`
+	if got := callAs(t, h.u, user, "whoami", `{}`); got != want {
+		t.Fatalf("whoami = %q, want %q", got, want)
+	}
+	calls := rec.byMethod("tools/call")
+	if len(calls) != 1 || calls[0].has {
+		t.Fatalf("tools/call POSTs %+v, want 1 without identity headers", calls)
+	}
+}
+
+func TestCallParamsMerge(t *testing.T) {
+	args := json.RawMessage(`{"text":"hi"}`)
+	alice := map[string]any{"provider": "github", "id": "alice"}
+
+	p := callParams("echo", args, "github:alice", "tok-1")
+	if p.Name != "echo" || string(p.Arguments.(json.RawMessage)) != `{"text":"hi"}` {
+		t.Fatalf("params = %+v", p)
+	}
+	if p.GetProgressToken() != "tok-1" {
+		t.Fatalf("progress token = %v", p.GetProgressToken())
+	}
+	if got, _ := p.Meta[UserMetaKey].(map[string]any); !maps.Equal(got, alice) {
+		t.Fatalf("meta[%s] = %v", UserMetaKey, p.Meta[UserMetaKey])
+	}
+	if len(p.Meta) != 2 {
+		t.Fatalf("meta = %v, want 2 keys", p.Meta)
+	}
+
+	p = callParams("echo", args, "", "tok-1")
+	if len(p.Meta) != 1 || p.GetProgressToken() != "tok-1" {
+		t.Fatalf("no user: meta = %v", p.Meta)
+	}
+
+	p = callParams("echo", args, "github:alice", "")
+	if got, _ := p.Meta[UserMetaKey].(map[string]any); len(p.Meta) != 1 || !maps.Equal(got, alice) {
+		t.Fatalf("no token: meta = %v", p.Meta)
+	}
+
+	if p = callParams("echo", nil, "-", ""); p.Meta != nil || p.Arguments != nil {
+		t.Fatalf("nothing: params = %+v", p)
 	}
 }
