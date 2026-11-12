@@ -23,8 +23,11 @@ const (
 
 	// consentPath is under authCookiePath so the browser sends the cookie
 	// with the consent POST. Plain /consent wouldn't get it.
-	consentPath  = "/oauth/consent"
-	callbackPath = "/oauth/github/callback"
+	consentPath     = "/oauth/consent"
+	callbackPath    = "/oauth/github/callback"
+	githubStartPath = "/oauth/github/start"
+	opStartPath     = "/oauth/open-payments/start"
+	opCallbackPath  = "/oauth/open-payments/callback"
 
 	maxStateLen = 2048
 	maxScopeLen = 1024
@@ -92,7 +95,8 @@ func validChallenge(c string) bool {
 
 // handleAuthorize starts an authorization: it validates the client and
 // redirect URI, saves an AuthRequest, binds it to this browser with a
-// cookie, and sends the user to GitHub.
+// cookie, and shows the sign-in page. With GitHub as the only provider it
+// skips the page and sends the user straight to GitHub.
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -167,8 +171,8 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		Scope:         q.Get("scope"),
 		ExpiresAt:     s.now().Add(authRequestTTL),
 	}
-	if s.gh == nil {
-		s.serverError(w, "no login provider", errors.New("github login is not configured"))
+	if s.gh == nil && s.op == nil {
+		s.serverError(w, "no login provider", errors.New("no login provider is configured"))
 		return
 	}
 	if err := s.store.SaveAuthRequest(r.Context(), ar); err != nil {
@@ -177,7 +181,11 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setAuthCookie(w, ar.ID, int(authRequestTTL/time.Second))
-	s.redirect(w, s.gh.AuthorizeURL(ar.ID, s.cfg.PublicURL+callbackPath))
+	if s.op == nil {
+		s.redirect(w, s.gh.AuthorizeURL(ar.ID, s.cfg.PublicURL+callbackPath))
+		return
+	}
+	s.signin(w, http.StatusOK, client.Name, ar.ID, "", "")
 }
 
 // handleGitHubCallback finishes the GitHub login. The state must name an

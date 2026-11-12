@@ -159,12 +159,15 @@ func serve(ctx context.Context, cfg *config.Config, getenv func(string) string, 
 	}
 	defer st.Close()
 
+	a, err := app.Build(cfg, getenv, log, st, app.Options{Version: version})
+	if err != nil {
+		return err
+	}
+
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-
-	a := app.Build(cfg, getenv, log, st, app.Options{Version: version})
 	names := make([]string, 0, len(cfg.Upstreams))
 	for _, uc := range cfg.Upstreams {
 		names = append(names, uc.Name)

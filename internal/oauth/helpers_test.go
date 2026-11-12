@@ -13,6 +13,8 @@ import (
 
 	"github.com/bithyte/mcp-dock/internal/config"
 	"github.com/bithyte/mcp-dock/internal/github"
+	"github.com/bithyte/mcp-dock/internal/identity"
+	"github.com/bithyte/mcp-dock/internal/oplogin"
 	"github.com/bithyte/mcp-dock/internal/store"
 	"github.com/bithyte/mcp-dock/internal/testutil"
 )
@@ -88,6 +90,79 @@ func newTestServerLog(t *testing.T, logOut io.Writer) (*Server, *httptest.Server
 	})
 	srv.Routes(mux)
 	return srv, ts, fake
+}
+
+// testGatewayWallet is the gateway's own wallet address in Open Payments tests.
+const testGatewayWallet = "https://gateway.example/mcp"
+
+// newTestServerOP starts an oauth server with Open Payments login against a
+// fake wallet and auth server, and GitHub login too when withGitHub is set
+// (the returned FakeGitHub is nil otherwise). allowWallets are wallet names
+// on the fake ("cozmin" allows fop.Wallet("cozmin")). Logs are discarded.
+func newTestServerOP(t *testing.T, allowGitHub, allowWallets []string, withGitHub bool) (*Server, *httptest.Server, *testutil.FakeGitHub, *testutil.FakeOpenPayments) {
+	t.Helper()
+	srv, ts, gh, fop, _ := newTestServerOPLogs(t, allowGitHub, allowWallets, withGitHub)
+	return srv, ts, gh, fop
+}
+
+// newTestServerOPLogs is newTestServerOP with JSON logs captured.
+func newTestServerOPLogs(t *testing.T, allowGitHub, allowWallets []string, withGitHub bool) (*Server, *httptest.Server, *testutil.FakeGitHub, *testutil.FakeOpenPayments, *logBuffer) {
+	t.Helper()
+	logs := &logBuffer{}
+	log := slog.New(slog.NewJSONHandler(logs, nil))
+	pemText, pub := testutil.Ed25519PEM(t)
+	fop := testutil.NewFakeOpenPayments(t, testGatewayWallet, pub)
+	opc, err := oplogin.New(oplogin.Config{
+		WalletAddress: testGatewayWallet,
+		KeyID:         "key-1",
+		PrivateKey:    pemText,
+		HTTP:          fop.Client(),
+		Logger:        log,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	st, err := store.Open(filepath.Join(t.TempDir(), "mcp-dock.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	wallets := make([]string, 0, len(allowWallets))
+	for _, name := range allowWallets {
+		n, err := identity.NormalizeWalletAddress(fop.Wallet(name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wallets = append(wallets, n)
+	}
+	cfg := &config.Config{
+		PublicURL: ts.URL,
+		DataDir:   t.TempDir(),
+		Providers: config.ProvidersConfig{OpenPayments: &config.OpenPaymentsConfig{
+			WalletAddress: testGatewayWallet, KeyID: "key-1", PrivateKey: pemText,
+		}},
+		AllowedUsers: config.AllowedUsers{GitHub: allowGitHub, OpenPayments: wallets},
+	}
+	opts := Options{Config: cfg, Store: st, OpenPayments: opc, Logger: log}
+	var gh *testutil.FakeGitHub
+	if withGitHub {
+		gh = testutil.NewFakeGitHub(t, testGitHubClientID, testGitHubClientSecret)
+		cfg.Providers.GitHub = &config.GitHubConfig{ClientID: testGitHubClientID, ClientSecret: testGitHubClientSecret}
+		opts.GitHub = &github.Client{
+			ClientID:     testGitHubClientID,
+			ClientSecret: testGitHubClientSecret,
+			WebBaseURL:   gh.URL,
+			APIBaseURL:   gh.URL,
+		}
+	}
+	srv := New(opts)
+	srv.Routes(mux)
+	return srv, ts, gh, fop, logs
 }
 
 // postJSON POSTs body (marshalled unless already []byte) and decodes the JSON response.

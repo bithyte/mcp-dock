@@ -124,13 +124,16 @@ func newEnv(t *testing.T, extra ...config.UpstreamConfig) *env {
 		}
 		return ""
 	}
-	e.app = app.Build(e.cfg, getenv, log, st, app.Options{
+	e.app, err = app.Build(e.cfg, getenv, log, st, app.Options{
 		Version:          "test",
 		GitHubWebBaseURL: e.fake.URL,
 		GitHubAPIBaseURL: e.fake.URL,
 		MinBackoff:       50 * time.Millisecond,
 		MaxBackoff:       200 * time.Millisecond,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	e.ts.Config.Handler = e.app.Handler
 	e.ts.Start()
 
