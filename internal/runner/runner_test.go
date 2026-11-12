@@ -292,14 +292,30 @@ func TestCancelRelayed(t *testing.T) {
 	url, _, _ := start(t, func(o *runner.Options) {
 		o.Env = append(o.Env, "FAKE_CANCEL_FILE="+cancelFile)
 	})
-	cs := connect(t, url, nil)
+	progress := make(chan struct{}, 1)
+	cs := connect(t, url, &mcp.ClientOptions{
+		ProgressNotificationHandler: func(context.Context, *mcp.ProgressNotificationClientRequest) {
+			select {
+			case progress <- struct{}{}:
+			default:
+			}
+		},
+	})
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	params := &mcp.CallToolParams{Name: "sleep", Arguments: map[string]any{"ms": 10000}}
+	params.SetProgressToken("tok")
 	done := make(chan error, 1)
 	go func() {
-		_, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "sleep", Arguments: map[string]any{"ms": 10000}})
+		_, err := cs.CallTool(ctx, params)
 		done <- err
 	}()
-	time.Sleep(200 * time.Millisecond)
+	// A progress notification means the child is inside the call.
+	select {
+	case <-progress:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no progress notification before cancel")
+	}
 	cancel()
 	if err := <-done; err == nil {
 		t.Fatal("cancelled call returned no error")

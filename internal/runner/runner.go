@@ -6,6 +6,8 @@ package runner
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"io"
 	"log/slog"
@@ -53,6 +55,7 @@ type Runner struct {
 
 	mu       sync.Mutex
 	closed   bool
+	starting int // slots reserved by initializes still spawning a child
 	sessions map[string]*session
 }
 
@@ -124,13 +127,29 @@ func (r *Runner) lookup(id string) *session {
 	return r.sessions[id]
 }
 
-func (r *Runner) isClosed() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.closed
+// authorized checks the bearer token, writing the 401 if it fails. With no
+// token configured every request passes.
+func (r *Runner) authorized(w http.ResponseWriter, req *http.Request) bool {
+	if r.opts.BearerToken == "" {
+		return true
+	}
+	scheme, tok, ok := strings.Cut(req.Header.Get("Authorization"), " ")
+	if ok && strings.EqualFold(scheme, "Bearer") {
+		// Hash both sides so the comparison doesn't leak the token length.
+		got, want := sha256.Sum256([]byte(tok)), sha256.Sum256([]byte(r.opts.BearerToken))
+		if subtle.ConstantTimeCompare(got[:], want[:]) == 1 {
+			return true
+		}
+	}
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	return false
 }
 
 func (r *Runner) serveMCP(w http.ResponseWriter, req *http.Request) {
+	if !r.authorized(w, req) {
+		return
+	}
 	id := req.Header.Get(sessionIDHeader)
 	switch req.Method {
 	case http.MethodPost:
@@ -170,7 +189,7 @@ func (r *Runner) serveMCP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
-	s.transport.ServeHTTP(w, req)
+	s.serve(w, req)
 }
 
 // serveInitialize handles a POST without a session id. Only a lone initialize
@@ -191,33 +210,50 @@ func (r *Runner) serveInitialize(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "missing Mcp-Session-Id: only an initialize request may start a session", http.StatusBadRequest)
 		return
 	}
-	if r.isClosed() {
+	// Reserve a slot and a wait group count before spawning, so neither the
+	// cap nor Close can miss a child that's still starting.
+	r.mu.Lock()
+	switch {
+	case r.closed:
+		r.mu.Unlock()
 		http.Error(w, "runner is shutting down", http.StatusServiceUnavailable)
 		return
+	case len(r.sessions)+r.starting >= r.opts.MaxSessions:
+		r.mu.Unlock()
+		http.Error(w, "too many sessions", http.StatusServiceUnavailable)
+		return
 	}
+	r.starting++
+	r.wg.Add(1)
+	r.mu.Unlock()
 
 	id := rand.Text()
 	s, err := newSession(r, id)
 	if err != nil {
+		r.mu.Lock()
+		r.starting--
+		r.mu.Unlock()
+		r.wg.Done()
 		r.log.Error("upstream failed to start", "session", id, "err", err)
 		http.Error(w, "upstream failed to start", http.StatusBadGateway)
 		return
 	}
 
+	s.begin() // this request counts as in flight from the start
+	defer s.finish()
 	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		s.cancel()
-		s.sconn.Close()
-		s.cconn.Close()
-		s.stderr.Flush()
+	r.starting--
+	r.sessions[id] = s
+	n := len(r.sessions)
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
+		// Close missed this session (it wasn't in the table yet) but is
+		// waiting on its wg count, so end it like any other.
+		s.end(reasonShutdown)
 		http.Error(w, "runner is shutting down", http.StatusServiceUnavailable)
 		return
 	}
-	r.sessions[id] = s
-	r.wg.Add(1)
-	n := len(r.sessions)
-	r.mu.Unlock()
 
 	s.log.Info("session started", "sessions", n)
 	s.start()

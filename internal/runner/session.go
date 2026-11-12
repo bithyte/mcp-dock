@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"sync"
@@ -38,9 +39,11 @@ type session struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 
-	mu    sync.Mutex
-	ended bool
-	done  chan struct{} // closed once the child has exited and cleanup finished
+	mu       sync.Mutex
+	ended    bool
+	inflight int         // HTTP requests (POST and GET) inside transport.ServeHTTP
+	idle     *time.Timer // set while inflight is 0
+	idleGen  int         // bumped whenever idle is set or cleared, to spot stale fires
 }
 
 // newSession starts the child and connects both transports. The session isn't
@@ -88,7 +91,6 @@ func newSession(r *Runner, id string) (*session, error) {
 		stderr:    stderr,
 		ctx:       ctx,
 		cancel:    cancel,
-		done:      make(chan struct{}),
 	}, nil
 }
 
@@ -128,15 +130,20 @@ func (s *session) childToClient() {
 }
 
 // end ends the session once: it removes it from the table, closes both sides
-// and waits for the child to exit. Later calls return at once; use wait to
-// block until the first one finishes.
-func (s *session) end(reason string) {
+// and waits for the child to exit. Later calls return at once. It calls
+// the runner's wg.Done, balancing the Add made before the child was spawned.
+func (s *session) end(reason string) { s.endIf(reason, nil) }
+
+// endIf is end, but does nothing unless cond (if non-nil) holds. cond runs
+// with s.mu held, so it can't race with begin.
+func (s *session) endIf(reason string, cond func() bool) {
 	s.mu.Lock()
-	if s.ended {
+	if s.ended || (cond != nil && !cond()) {
 		s.mu.Unlock()
 		return
 	}
 	s.ended = true
+	s.stopIdleLocked()
 	s.mu.Unlock()
 
 	n := s.r.remove(s)
@@ -149,8 +156,49 @@ func (s *session) end(reason string) {
 		attrs = append(attrs, "exit", err.Error())
 	}
 	s.log.Info("session ended", attrs...)
-	close(s.done)
 	s.r.wg.Done()
 }
 
-func (s *session) wait() { <-s.done }
+// serve relays one request through the transport, counting it as in flight.
+func (s *session) serve(w http.ResponseWriter, req *http.Request) {
+	s.begin()
+	defer s.finish()
+	s.transport.ServeHTTP(w, req)
+}
+
+// begin marks a request in flight and stops the idle timer.
+func (s *session) begin() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inflight++
+	s.stopIdleLocked()
+}
+
+// finish marks a request done; with none left, the idle timer starts.
+func (s *session) finish() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inflight--
+	if s.inflight > 0 || s.ended {
+		return
+	}
+	s.idleGen++
+	gen := s.idleGen
+	s.idle = time.AfterFunc(s.r.opts.IdleTimeout, func() { s.idleFired(gen) })
+}
+
+// stopIdleLocked cancels the idle timer. A fire that already started is
+// disarmed by the generation bump. s.mu must be held.
+func (s *session) stopIdleLocked() {
+	if s.idle != nil {
+		s.idle.Stop()
+		s.idle = nil
+	}
+	s.idleGen++
+}
+
+// idleFired ends the session unless a request arrived since the timer for gen
+// was set. The check and the end are atomic under s.mu.
+func (s *session) idleFired(gen int) {
+	s.endIf(reasonIdle, func() bool { return gen == s.idleGen && s.inflight == 0 })
+}
