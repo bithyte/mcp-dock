@@ -197,6 +197,8 @@ The Dock plus two runners. The runners are on an internal network with the Dock 
         tmpfs: [/tmp]
         stop_grace_period: 15s
         env_file: ./jaypost.env
+        # Lets the runner reach the jaypost service on the host; see below.
+        extra_hosts: ["host.docker.internal:host-gateway"]
         volumes:
           - jaypost-data:/data
           - /path/to/bin/jaypost:/usr/local/bin/jaypost:ro
@@ -215,7 +217,9 @@ The env files:
 
 - `mcp-dock.env`: `GITHUB_CLIENT_SECRET`, `EVERYTHING_RUNNER_TOKEN`, `JAYPOST_RUNNER_TOKEN`.
 - `everything.env`: `MCP_RUNNER_BEARER_TOKEN`, the same value as `EVERYTHING_RUNNER_TOKEN`.
-- `jaypost.env`: `MCP_RUNNER_BEARER_TOKEN` (same as `JAYPOST_RUNNER_TOKEN`), `JAYPOST_URL`, `JAYPOST_TOKEN`.
+- `jaypost.env`: `MCP_RUNNER_BEARER_TOKEN` (same as `JAYPOST_RUNNER_TOKEN`), `JAYPOST_URL=http://host.docker.internal:8787`, `JAYPOST_TOKEN`.
+
+The jaypost service is a placeholder until you've done the host-side setup. The service runs on the host and listens on `127.0.0.1:8787` by default, which no container can reach. `extra_hosts` maps `host.docker.internal` to the host's bridge gateway address, but the service also has to listen on that address (for docker's default bridge, usually `172.17.0.1`; check with `ip addr show docker0`). Bind it to that address only, not `0.0.0.0`: the gateway address is reachable from every container on the host, and `0.0.0.0` would expose the service on all interfaces. Anything that can reach that address with the API key can use jaypost, so firewall it if other containers on the host aren't trusted. I haven't checked how jaypost sets its listen address, and none of this has been tested; the owner should confirm it against jaypost's docs. With rootless podman, `host-gateway` support depends on the version and network backend, so that's untested too.
 
 And the upstreams in `config.yaml`:
 
@@ -305,7 +309,7 @@ Every `tools/call` the gateway sends to an upstream says who the signed-in user 
 
 `provider` is `github` or `open_payments`. For GitHub, `id` is the login, lowercased. For Open Payments, it's the normalized wallet address, e.g. `{"provider": "open_payments", "id": "https://wallet.example/alice"}`. `_meta` reaches stdio servers behind mcp-runner unchanged, so that's the field to read.
 
-The same two values are also sent as HTTP headers on the POST carrying the call, `X-MCP-Dock-User-Provider` and `X-MCP-Dock-User-Id`, for HTTP-native upstreams that can't read `_meta`. mcp-runner ignores them. If a value isn't a valid HTTP header value, the headers are left out for that call and only `_meta` carries the identity. Requests not made on behalf of a call (initialize, tools/list, pings) carry none, since the session is shared by all users.
+The same two values are also sent as HTTP headers, `X-MCP-Dock-User-Provider` and `X-MCP-Dock-User-Id`, for HTTP-native upstreams that can't read `_meta`. They go on every request the gateway makes on behalf of the call: the POST carrying the `tools/call`, and also a `notifications/cancelled` for it if the call is cancelled. mcp-runner ignores them. If a value isn't a valid HTTP header value, the headers are left out for that call and only `_meta` carries the identity. Requests not made on behalf of a call (initialize, tools/list, pings) carry none, since the session is shared by all users.
 
 The gateway always sets these from the authenticated session. It never forwards a client's `_meta`, so a client can't claim to be someone else by sending the key itself. With no signed-in user there's no key and no headers.
 
@@ -330,7 +334,7 @@ jaypost's MCP process runs in an mcp-runner container (`jaypost mcp`, as in the 
 2. Run `jaypost service install`.
 3. Pair it with your Telegram/Discord bot.
 4. Create an API key.
-5. Put `JAYPOST_URL` and `JAYPOST_TOKEN` in the jaypost runner's env (`jaypost.env`), not the Dock's. `JAYPOST_URL` has to be reachable from inside the runner container: `127.0.0.1` there is the container itself, not the host, so the service's default `http://127.0.0.1:8787` won't work as is.
+5. Put `JAYPOST_URL` and `JAYPOST_TOKEN` in the jaypost runner's env (`jaypost.env`), not the Dock's. `JAYPOST_URL` has to be reachable from inside the runner container: `127.0.0.1` there is the container itself, not the host, so the service's default `http://127.0.0.1:8787` won't work as is. See the note under the [compose example](#compose-example) for one way to set it up (untested).
 
 These steps haven't been checked against jaypost's own docs. The owner should confirm them (the service install command and how the API key is created in particular).
 
