@@ -90,11 +90,11 @@ The child gets the runner's environment minus every `MCP_RUNNER_*` variable, so 
 
 ### Running a runner
 
-The image's entrypoint is `mcp-runner` with no default command; the container command is the stdio server to run. The examples publish on `127.0.0.1` for a Dock running on the host; with a containerized Dock, use a shared network and don't publish at all. Pin every package to an exact version.
+The image's entrypoint is `mcp-runner` with no default command; the container command is the stdio server to run. The examples publish on `127.0.0.1` for a Dock running on the host; with a containerized Dock, use a shared network and don't publish at all. Pin every package to an exact version. Run runners with an init process (`--init` here, `init: true` in compose): the runner is otherwise PID 1, and when it kills an npx or uvx wrapper, the wrapper's own child is orphaned to PID 1, which only reaps its direct children, so it'd stay a zombie once it exits.
 
 npx (`--prefer-offline` keeps registry revalidation to a minimum on restarts):
 
-    podman run -d --name everything \
+    podman run -d --name everything --init \
       --read-only --cap-drop=ALL --security-opt no-new-privileges \
       --user 65532:65532 --tmpfs /tmp \
       -p 127.0.0.1:8081:8080 \
@@ -105,7 +105,7 @@ npx (`--prefer-offline` keeps registry revalidation to a minimum on restarts):
 
 uvx:
 
-    podman run -d --name time \
+    podman run -d --name time --init \
       --read-only --cap-drop=ALL --security-opt no-new-privileges \
       --user 65532:65532 --tmpfs /tmp \
       -p 127.0.0.1:8082:8080 \
@@ -116,7 +116,7 @@ uvx:
 
 A mounted binary, with its secrets in an env file:
 
-    podman run -d --name jaypost \
+    podman run -d --name jaypost --init \
       --read-only --cap-drop=ALL --security-opt no-new-privileges \
       --user 65532:65532 --tmpfs /tmp \
       -p 127.0.0.1:8083:8080 \
@@ -155,6 +155,7 @@ If you don't want installs at startup, build on the runner image and install at 
 - The runner relays standard MCP methods transparently, but it uses the go-sdk server transport, so a client request with a non-standard method (or a standard method missing required params) is rejected with HTTP 400 and never reaches the child.
 - Notifications the child sends on its own (not as part of a request's response) go out only on the session's standalone GET stream, and are dropped if none is open.
 - No resumability: if the Dock-to-runner connection drops, the in-flight call fails.
+- The runner only speaks the stateful protocol that starts with `initialize`. The Dock's client tries `server/discover` first on every connect, gets a 400 from the runner, and falls back to `initialize`, so each connect costs one extra round trip.
 
 ### Compose example
 
@@ -179,6 +180,7 @@ The Dock plus two runners. The runners are on an internal network with the Dock 
       everything:
         image: ghcr.io/bithyte/mcp-runner:0.2.0
         command: ["npx", "--prefer-offline", "-y", "@modelcontextprotocol/server-everything@2.3.0", "stdio"]
+        init: true
         read_only: true
         cap_drop: [ALL]
         security_opt: [no-new-privileges]
@@ -192,6 +194,7 @@ The Dock plus two runners. The runners are on an internal network with the Dock 
       jaypost:
         image: ghcr.io/bithyte/mcp-runner:0.2.0
         command: ["jaypost", "mcp"]
+        init: true
         read_only: true
         cap_drop: [ALL]
         security_opt: [no-new-privileges]
@@ -221,7 +224,7 @@ The env files:
 - `everything.env`: `MCP_RUNNER_BEARER_TOKEN`, the same value as `EVERYTHING_RUNNER_TOKEN`.
 - `jaypost.env`: `MCP_RUNNER_BEARER_TOKEN` (same as `JAYPOST_RUNNER_TOKEN`), `JAYPOST_URL=http://host.docker.internal:8787`, `JAYPOST_TOKEN`.
 
-The jaypost service is a placeholder until you've done the host-side setup. The service runs on the host and listens on `127.0.0.1:8787` by default, which no container can reach. `extra_hosts` maps `host.docker.internal` to the host's bridge gateway address, but the service also has to listen on that address (for docker's default bridge, usually `172.17.0.1`; check with `ip addr show docker0`). Bind it to that address only, not `0.0.0.0`: the gateway address is reachable from every container on the host, and `0.0.0.0` would expose the service on all interfaces. Anything that can reach that address with the API key can use jaypost, so firewall it if other containers on the host aren't trusted. I haven't checked how jaypost sets its listen address, and none of this has been tested; the owner should confirm it against jaypost's docs. With rootless podman, `host-gateway` support depends on the version and network backend, so that's untested too.
+The jaypost service is a placeholder until you've done the host-side setup. The service runs on the host and listens on `127.0.0.1:8787` by default, which no container can reach. `extra_hosts` maps `host.docker.internal` to the host's bridge gateway address, but the service also has to listen on that address (for docker's default bridge, usually `172.17.0.1`; check with `ip addr show docker0`). Bind it to that address only, not `0.0.0.0`: the gateway address is reachable from every container on the host, and `0.0.0.0` would expose the service on all interfaces. Anything that can reach that address with the API key can use jaypost, so firewall it if other containers on the host aren't trusted. Untested: how jaypost sets its listen address, and all of this setup; confirm it against jaypost's docs. With rootless podman, `host-gateway` support depends on the version and network backend, so that's untested too.
 
 And the upstreams in `config.yaml`:
 
