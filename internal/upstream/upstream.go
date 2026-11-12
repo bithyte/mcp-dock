@@ -62,7 +62,8 @@ type Options struct {
 	// request.
 	BearerToken string
 	// HTTPClient is the base client. Nil means a client with no overall
-	// timeout, since tool calls can run for a long time.
+	// timeout, since tool calls can run for a long time. It's copied, and
+	// its CheckRedirect is replaced: redirects are never followed.
 	HTTPClient     *http.Client
 	Version        string // client implementation version sent on initialize
 	Logger         *slog.Logger
@@ -153,12 +154,17 @@ func withCaller(ctx context.Context, user string) context.Context {
 }
 
 // wrapClient returns a copy of base (or a default client) whose transport
-// adds the upstream's headers.
+// adds the upstream's headers. Redirects are never followed, even if base
+// would follow them: the transport adds the bearer and identity headers on
+// every hop, so a redirect would hand them, and the request body, to
+// whatever host it names. The 3xx is returned as is and the SDK fails the
+// request.
 func wrapClient(base *http.Client, bearer string) *http.Client {
 	c := &http.Client{}
 	if base != nil {
 		*c = *base
 	}
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	rt := c.Transport
 	if rt == nil {
 		rt = http.DefaultTransport

@@ -11,6 +11,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -898,5 +899,41 @@ func TestCallParamsMerge(t *testing.T) {
 
 	if p = callParams("echo", nil, "-", ""); p.Meta != nil || p.Arguments != nil {
 		t.Fatalf("nothing: params = %+v", p)
+	}
+}
+
+// A redirect from the upstream is never followed: the transport adds the
+// bearer and identity headers on every hop, so following one would hand them
+// (and the request body) to whatever host the redirect names.
+func TestRedirectNotFollowed(t *testing.T) {
+	var hits atomic.Int32
+	var leaked atomic.Value
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		leaked.Store(r.Header.Get("Authorization") + "|" + r.Header.Get(HeaderUserProvider))
+		http.Error(w, "nope", http.StatusTeapot)
+	}))
+	t.Cleanup(other.Close)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/mcp", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+	for _, name := range []string{"default client", "caller client"} {
+		t.Run(name, func(t *testing.T) {
+			h := startURL(t, redirector.URL+"/mcp", func(o *Options) {
+				o.BearerToken = "tok"
+				if name == "caller client" {
+					// Even one that asks to follow every redirect.
+					o.HTTPClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }}
+				}
+			})
+			eventually(t, 10*time.Second, "failed start logged", func() bool { return startFailures(t, h) >= 1 })
+			if h.u.Tools() != nil {
+				t.Fatal("upstream came up through a redirect")
+			}
+			if n := hits.Load(); n != 0 {
+				t.Fatalf("redirect target contacted %d times (headers %v)", n, leaked.Load())
+			}
+		})
 	}
 }
