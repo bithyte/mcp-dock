@@ -1021,3 +1021,33 @@ func TestTransportMarksReached(t *testing.T) {
 		})
 	}
 }
+
+// Pings keep going while a call runs, and a call longer than the ping
+// interval isn't cut off by them.
+func TestLongCallSurvivesPings(t *testing.T) {
+	var pings atomic.Int32
+	count := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				b, _ := io.ReadAll(r.Body)
+				if bytes.Contains(b, []byte(`"method":"ping"`)) {
+					pings.Add(1)
+				}
+				r.Body = io.NopCloser(bytes.NewReader(b))
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	h := startWith(t, testutil.RunnerOptions{Wrap: count}, func(o *Options) { o.PingInterval = 50 * time.Millisecond })
+	h.waitUp(t)
+	before, p0 := h.changeCount(), pings.Load()
+	if got := call(t, h.u, "sleep", `{"ms":1500}`); got != "done" {
+		t.Fatalf("sleep = %q, want done", got)
+	}
+	if n := pings.Load() - p0; n < 5 {
+		t.Fatalf("%d pings during a 1.5s call, want at least 5", n)
+	}
+	if h.sawDownAfter(before) || hasLog(t, h, "upstream ping failed") {
+		t.Fatal("upstream went down during a long call")
+	}
+}
