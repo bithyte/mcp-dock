@@ -8,12 +8,12 @@ You can also push a `vX.Y.Z` tag by hand; that triggers the same publish workflo
 
 ## What gets published
 
-- Image `ghcr.io/bithyte/mcp-dock` (linux/amd64 and linux/arm64) tagged `X.Y.Z`, `X.Y` and `latest`. The image is tested before it's pushed. `latest` and `X.Y` move on every release, including a backport tag.
-- A GitHub release `vX.Y.Z` with `mcp-dock-linux-x64.gz`, `mcp-dock-linux-arm64.gz` and `SHA256SUMS`, generated notes, and the image digest.
+- Images `ghcr.io/bithyte/mcp-dock` and `ghcr.io/bithyte/mcp-runner` (both linux/amd64 and linux/arm64), each tagged `X.Y.Z`, `X.Y` and `latest`. Both are tested before either is pushed. `latest` and `X.Y` move on every release, including a backport tag.
+- A GitHub release `vX.Y.Z` with `mcp-dock-linux-x64.gz`, `mcp-dock-linux-arm64.gz`, `mcp-runner-linux-x64.gz`, `mcp-runner-linux-arm64.gz` and one `SHA256SUMS` covering all four, generated notes, and both image digests.
 
 ## One-time setup
 
-- Make the GHCR package public: package settings, "Change visibility". New packages start private.
+- Make the GHCR packages public: package settings, "Change visibility". New packages start private. Do it for `mcp-dock` and for the new `mcp-runner` package. `mcp-runner` doesn't exist until the first release pushes it, so flip it to public right after that release.
 - If the org restricts the default `GITHUB_TOKEN`, the repo's Actions settings need to let it write (tag push, release, package).
 
 ## When publish fails
@@ -24,4 +24,4 @@ To recover from a real bug: fix it on main, delete the tag (`git push --delete o
 
 ## Dependencies
 
-Base images in the `Containerfile` and the actions in the workflows are pinned by digest or SHA. Bumping them is a normal PR.
+Base images in the `Containerfile` and `Containerfile.runner` and the actions in the workflows are pinned by digest or SHA. Bumping them is a normal PR.

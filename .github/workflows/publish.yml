@@ -20,6 +20,7 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/bithyte/mcp-dock
+  IMAGE_RUNNER: ghcr.io/bithyte/mcp-runner
 
 jobs:
   publish:
@@ -67,6 +68,9 @@ jobs:
 
       # --load can't load a multi-platform image, so test each platform
       # separately, then build both with --push (builder cache makes it cheap).
+      # Both images are tested before either is pushed. The Dock image is
+      # distroless, so these steps never exec a shell in it: they set
+      # --entrypoint to the binary and inspect it from outside with docker cp.
       - name: Build and test amd64
         run: |
           docker buildx build --platform linux/amd64 --load -f Containerfile \
@@ -94,21 +98,55 @@ jobs:
             exit 1
           fi
 
+      - name: Build and test runner amd64
+        run: |
+          docker buildx build --platform linux/amd64 --load -f Containerfile.runner \
+            --build-arg VERSION="$VERSION" -t mcp-runner:test-amd64 .
+          CT=docker EXPECT_VERSION="$VERSION" scripts/test-runner-image.sh mcp-runner:test-amd64
+
+      - name: Build and check runner arm64
+        run: |
+          docker buildx build --platform linux/arm64 --load -f Containerfile.runner \
+            --build-arg VERSION="$VERSION" -t mcp-runner:test-arm64 .
+          got=$(docker run --rm --platform linux/arm64 --entrypoint mcp-runner mcp-runner:test-arm64 -version)
+          if [ "$got" != "$VERSION" ]; then
+            echo "error: arm64 runner image reports '$got', expected '$VERSION'" >&2
+            exit 1
+          fi
+          # As for the Dock: the run proves nothing about GOARCH, and the image
+          # has no go toolchain, so copy the binary out and inspect it here.
+          tmp=$(mktemp -d)
+          id=$(docker create --platform linux/arm64 mcp-runner:test-arm64)
+          docker cp "$id:/usr/local/bin/mcp-runner" "$tmp/mcp-runner"
+          docker rm "$id" >/dev/null
+          if ! go version -m "$tmp/mcp-runner" | grep -qx $'\tbuild\tGOARCH=arm64'; then
+            echo "error: arm64 runner image binary is not GOARCH=arm64" >&2
+            go version -m "$tmp/mcp-runner" >&2 || true
+            exit 1
+          fi
+
       - name: Push multi-arch image
         run: |
           docker buildx build --platform linux/amd64,linux/arm64 --push -f Containerfile \
             --build-arg VERSION="$VERSION" \
             -t "$IMAGE:$VERSION" -t "$IMAGE:$MINOR" -t "$IMAGE:latest" .
 
+      - name: Push multi-arch runner image
+        run: |
+          docker buildx build --platform linux/amd64,linux/arm64 --push -f Containerfile.runner \
+            --build-arg VERSION="$VERSION" \
+            -t "$IMAGE_RUNNER:$VERSION" -t "$IMAGE_RUNNER:$MINOR" -t "$IMAGE_RUNNER:latest" .
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')
-          if [ -z "$digest" ]; then
-            echo "error: could not read image digest" >&2
+          runner_digest=$(docker buildx imagetools inspect "$IMAGE_RUNNER:$VERSION" --format '{{.Manifest.Digest}}')
+          if [ -z "$digest" ] || [ -z "$runner_digest" ]; then
+            echo "error: could not read image digests" >&2
             exit 1
           fi
           # --notes is prepended to the generated notes.
           gh release create "v$VERSION" dist/* --verify-tag --generate-notes \
-            --notes "Image: \`$IMAGE:$VERSION\`, digest \`$digest\`"
+            --notes "Images: \`$IMAGE:$VERSION\`, digest \`$digest\`; \`$IMAGE_RUNNER:$VERSION\`, digest \`$runner_digest\`"

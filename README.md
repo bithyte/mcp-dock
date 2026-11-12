@@ -236,11 +236,13 @@ This compose file hasn't been run as written. The image settings in it are the o
 
 ## Release binaries
 
-Each GitHub release has `mcp-dock-linux-x64.gz`, `mcp-dock-linux-arm64.gz` and `SHA256SUMS`, for running without a container.
+Each GitHub release has `mcp-dock-linux-x64.gz`, `mcp-dock-linux-arm64.gz`, `mcp-runner-linux-x64.gz`, `mcp-runner-linux-arm64.gz` and one `SHA256SUMS` covering all four, for running without a container.
 
     sha256sum -c SHA256SUMS --ignore-missing
     gunzip mcp-dock-linux-x64.gz
     chmod +x mcp-dock-linux-x64
+
+The `mcp-runner` binaries work the same way. Outside the image you supply node, python and uv yourself.
 
 Run the check after downloading, before the `gunzip`.
 
