@@ -24,9 +24,10 @@ type Backend interface {
 	// Tools returns the upstream's current tools, or nil while it is down.
 	// The returned values must not be modified.
 	Tools() []*mcp.Tool
-	// Call invokes tool. onProgress, if non-nil, runs on the upstream
-	// session's receive loop and must not block.
-	Call(ctx context.Context, tool string, args json.RawMessage,
+	// Call invokes tool as user, the authenticated user id ("" if none).
+	// onProgress, if non-nil, runs on the upstream session's receive loop
+	// and must not block.
+	Call(ctx context.Context, user string, tool string, args json.RawMessage,
 		onProgress func(*mcp.ProgressNotificationParams)) (*mcp.CallToolResult, error)
 }
 
@@ -257,8 +258,13 @@ func (g *Gateway) call(ctx context.Context, req *mcp.CallToolRequest, b Backend,
 		}
 	}
 
-	// args are the exact bytes Check inspected.
-	res, err = b.Call(ctx, tool, args, onProgress)
+	// args are the exact bytes Check inspected. The user comes only from
+	// the authenticated session; the client's _meta isn't passed on.
+	var user string
+	if req.Extra != nil && req.Extra.TokenInfo != nil {
+		user = req.Extra.TokenInfo.UserID
+	}
+	res, err = b.Call(ctx, user, tool, args, onProgress)
 	switch {
 	case err == nil && res == nil:
 		return &mcp.CallToolResult{Content: []mcp.Content{}}, ""

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the linux release binaries and checksums.
 # Usage: scripts/build-release-binaries.sh <X.Y.Z> <outdir>
-# Writes mcp-dock-linux-x64.gz, mcp-dock-linux-arm64.gz and SHA256SUMS into <outdir>.
+# Writes mcp-dock-linux-{x64,arm64}.gz, mcp-runner-linux-{x64,arm64}.gz and one
+# SHA256SUMS covering all four into <outdir>.
 set -euo pipefail
 
 VERSION=${1:?usage: build-release-binaries.sh <X.Y.Z> <outdir>}
@@ -22,16 +23,18 @@ REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 OUTDIR=$(cd "$OUTDIR" && pwd)
 
 # GOARCH:asset-suffix
-for pair in amd64:x64 arm64:arm64; do
-	goarch=${pair%%:*}
-	suffix=${pair##*:}
-	(
-		cd "$REPO_ROOT"
-		CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" go build -mod=readonly -trimpath \
-			-ldflags "-s -w -X main.version=$VERSION" \
-			-o "$OUTDIR/mcp-dock-linux-$suffix" ./cmd/mcp-dock
-	)
-	gzip -9n "$OUTDIR/mcp-dock-linux-$suffix"
+for cmd in mcp-dock mcp-runner; do
+	for pair in amd64:x64 arm64:arm64; do
+		goarch=${pair%%:*}
+		suffix=${pair##*:}
+		(
+			cd "$REPO_ROOT"
+			CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" go build -mod=readonly -trimpath \
+				-ldflags "-s -w -X main.version=$VERSION" \
+				-o "$OUTDIR/$cmd-linux-$suffix" "./cmd/$cmd"
+		)
+		gzip -9n "$OUTDIR/$cmd-linux-$suffix"
+	done
 done
 
 (cd "$OUTDIR" && sha256sum ./*.gz | sed 's# \./# #' | sort -k2 >SHA256SUMS)

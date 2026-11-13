@@ -12,22 +12,15 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -mod=readonly -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/mcp-dock ./cmd/mcp-dock
+# The final stage has no shell, so make /data here and copy it over.
+RUN install -d -m 0700 /out/rootfs/data
 
-# ghcr.io/astral-sh/uv:0.13.7, only used to copy the uv binaries
-FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 AS uv
-
-# node:24-trixie-slim
-FROM docker.io/library/node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0
+# gcr.io/distroless/static-debian13:nonroot (ca-certificates, tzdata, no shell)
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
 LABEL org.opencontainers.image.source=https://github.com/bithyte/mcp-dock
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 libatomic1 ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=uv /uv /uvx /usr/local/bin/
 COPY --from=build /out/mcp-dock /usr/local/bin/mcp-dock
-COPY image/npmrc /usr/local/etc/npmrc
-COPY image/uv.toml /etc/uv/uv.toml
-ENV MCP_DOCK_CONFIG=/etc/mcp-dock/config.yaml HOME=/data/home
-RUN install -d -o 65532 -g 65532 -m 0700 /data
+COPY --from=build --chown=65532:65532 /out/rootfs/ /
+ENV MCP_DOCK_CONFIG=/etc/mcp-dock/config.yaml
 USER 65532:65532
 ENTRYPOINT ["mcp-dock"]
 CMD ["serve"]

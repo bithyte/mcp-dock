@@ -32,6 +32,7 @@ type fakeBackend struct {
 }
 
 type fakeCall struct {
+	user string
 	tool string
 	args json.RawMessage
 }
@@ -50,10 +51,10 @@ func (f *fakeBackend) setTools(ts []*mcp.Tool) {
 	f.mu.Unlock()
 }
 
-func (f *fakeBackend) Call(ctx context.Context, tool string, args json.RawMessage,
+func (f *fakeBackend) Call(ctx context.Context, user, tool string, args json.RawMessage,
 	onProgress func(*mcp.ProgressNotificationParams)) (*mcp.CallToolResult, error) {
 	f.mu.Lock()
-	f.calls = append(f.calls, fakeCall{tool: tool, args: slices.Clone(args)})
+	f.calls = append(f.calls, fakeCall{user: user, tool: tool, args: slices.Clone(args)})
 	fn := f.callFn
 	f.mu.Unlock()
 	if fn != nil {
@@ -709,5 +710,32 @@ func TestDenyArgsUnmatchedWarns(t *testing.T) {
 	}
 	if rec["level"] != "WARN" || rec["upstream"] != "jaypost" || rec["path"] != "attachment.pth" {
 		t.Fatalf("record = %v", rec)
+	}
+}
+
+// The backend gets the authenticated user id from the request, never
+// anything the client put in _meta.
+func TestCallPassesIdentity(t *testing.T) {
+	jp, ot := twoBackends()
+	g := New(Options{Backends: []Backend{jp, ot}})
+	h := g.handler(ot, "echo", "other__echo")
+	req := &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{
+			Name:      "other__echo",
+			Arguments: json.RawMessage(`{}`),
+			Meta:      mcp.Meta{upstream.UserMetaKey: map[string]any{"provider": "github", "id": "mallory"}},
+		},
+		Extra: &mcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: "github:alice"}},
+	}
+	if res, err := h(context.Background(), req); err != nil || res.IsError {
+		t.Fatalf("handler: %v %+v", err, res)
+	}
+	req = &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "other__echo", Arguments: json.RawMessage(`{}`)}}
+	if res, err := h(context.Background(), req); err != nil || res.IsError {
+		t.Fatalf("handler: %v %+v", err, res)
+	}
+	calls := ot.gotCalls()
+	if len(calls) != 2 || calls[0].user != "github:alice" || calls[1].user != "" {
+		t.Fatalf("calls = %+v, want users github:alice then empty", calls)
 	}
 }

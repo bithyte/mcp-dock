@@ -6,7 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
+	"maps"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,7 +22,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bithyte/mcp-dock/internal/runner"
 	"github.com/bithyte/mcp-dock/internal/testutil"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -106,16 +114,33 @@ func (h *harness) waitUp(t *testing.T) {
 	eventually(t, 10*time.Second, "upstream up", func() bool { return h.u.Tools() != nil })
 }
 
-// start launches an upstream supervisor for the fake. mod may adjust options.
+// start launches an upstream supervisor for the fake behind a runner. mod
+// may adjust the upstream options.
 func start(t *testing.T, mod func(*Options)) *harness {
 	t.Helper()
-	bin := testutil.BuildFakeUpstream(t)
+	url, _ := testutil.StartRunner(t, testutil.RunnerOptions{})
+	return startURL(t, url, mod)
+}
+
+// startWith is start with runner options.
+func startWith(t *testing.T, ro testutil.RunnerOptions, mod func(*Options)) *harness {
+	t.Helper()
+	url, _ := testutil.StartRunner(t, ro)
+	return startURL(t, url, mod)
+}
+
+// childEnv returns runner options adding env vars to the fake child.
+func childEnv(kv ...string) testutil.RunnerOptions {
+	return testutil.RunnerOptions{Mod: func(o *runner.Options) { o.Env = append(o.Env, kv...) }}
+}
+
+// startURL launches an upstream supervisor for the given endpoint.
+func startURL(t *testing.T, url string, mod func(*Options)) *harness {
+	t.Helper()
 	h := &harness{logs: &syncBuffer{}, runDone: make(chan struct{})}
 	opts := Options{
 		Name:       "fake",
-		Command:    bin,
-		Env:        []string{"PATH=" + os.Getenv("PATH")},
-		WorkDir:    filepath.Join(t.TempDir(), "upstreams", "fake", "cwd"),
+		URL:        url,
 		Logger:     slog.New(slog.NewJSONHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		MinBackoff: 50 * time.Millisecond,
 		MaxBackoff: 200 * time.Millisecond,
@@ -163,7 +188,7 @@ func call(t *testing.T, u *Upstream, tool, args string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	res, err := u.Call(ctx, tool, json.RawMessage(args), nil)
+	res, err := u.Call(ctx, "", tool, json.RawMessage(args), nil)
 	if err != nil {
 		t.Fatalf("Call(%s): %v", tool, err)
 	}
@@ -179,7 +204,7 @@ func TestStartListsTools(t *testing.T) {
 		t.Fatalf("Name() = %q", h.u.Name())
 	}
 	h.waitUp(t)
-	for _, name := range []string{"echo", "sleep", "crash", "getenv", "cwd", "notify", "add_tool"} {
+	for _, name := range []string{"echo", "sleep", "crash", "getenv", "cwd", "notify", "add_tool", "whoami"} {
 		if !h.hasTool(name) {
 			t.Errorf("tool %q missing", name)
 		}
@@ -195,38 +220,13 @@ func TestCallEcho(t *testing.T) {
 	}
 }
 
-func TestMinimalEnvAndCwd(t *testing.T) {
-	t.Setenv("SECRET", "x")
-	h := start(t, func(o *Options) {
-		o.Env = []string{"PATH=" + os.Getenv("PATH"), "FOO=bar"}
-	})
-	h.waitUp(t)
-	if got := call(t, h.u, "getenv", `{"name":"FOO"}`); got != "bar" {
-		t.Errorf("FOO = %q, want bar", got)
-	}
-	if got := call(t, h.u, "getenv", `{"name":"SECRET"}`); got != "<unset>" {
-		t.Errorf("SECRET = %q, want <unset>", got)
-	}
-	want, err := filepath.EvalSymlinks(h.u.opts.WorkDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := filepath.EvalSymlinks(call(t, h.u, "cwd", `{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != want {
-		t.Errorf("cwd = %q, want %q", got, want)
-	}
-}
-
 func TestProgressForwarded(t *testing.T) {
 	h := start(t, nil)
 	h.waitUp(t)
 	var n atomic.Int32
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	res, err := h.u.Call(ctx, "sleep", json.RawMessage(`{"ms":300}`), func(p *mcp.ProgressNotificationParams) {
+	res, err := h.u.Call(ctx, "", "sleep", json.RawMessage(`{"ms":300}`), func(p *mcp.ProgressNotificationParams) {
 		n.Add(1)
 	})
 	if err != nil {
@@ -242,15 +242,13 @@ func TestProgressForwarded(t *testing.T) {
 
 func TestCancelPropagates(t *testing.T) {
 	cancelFile := filepath.Join(t.TempDir(), "cancel")
-	h := start(t, func(o *Options) {
-		o.Env = append(o.Env, "FAKE_CANCEL_FILE="+cancelFile)
-	})
+	h := startWith(t, childEnv("FAKE_CANCEL_FILE="+cancelFile), nil)
 	h.waitUp(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	time.AfterFunc(100*time.Millisecond, cancel)
 	begin := time.Now()
-	_, err := h.u.Call(ctx, "sleep", json.RawMessage(`{"ms":5000}`), nil)
+	_, err := h.u.Call(ctx, "", "sleep", json.RawMessage(`{"ms":5000}`), nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
@@ -272,7 +270,7 @@ func TestRPCErrorNotUnavailable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// Unknown tool: the upstream answers with a JSON-RPC error and stays up.
-	_, err := h.u.Call(ctx, "no_such_tool", json.RawMessage(`{}`), nil)
+	_, err := h.u.Call(ctx, "", "no_such_tool", json.RawMessage(`{}`), nil)
 	if err == nil {
 		t.Fatal("unknown tool returned no error")
 	}
@@ -294,7 +292,7 @@ func TestCallsNotSerialized(t *testing.T) {
 	slowDone := make(chan struct{})
 	go func() {
 		defer close(slowDone)
-		_, _ = h.u.Call(ctx, "sleep", json.RawMessage(`{"ms":10000}`), func(*mcp.ProgressNotificationParams) {
+		_, _ = h.u.Call(ctx, "", "sleep", json.RawMessage(`{"ms":10000}`), func(*mcp.ProgressNotificationParams) {
 			once.Do(func() { close(inFlight) })
 		})
 	}()
@@ -324,7 +322,7 @@ func TestShutdownWithInFlightCall(t *testing.T) {
 	callErr := make(chan error, 1)
 	go func() {
 		// Background ctx: nothing but shutdown can end this call.
-		_, err := h.u.Call(context.Background(), "sleep", json.RawMessage(`{"ms":60000}`), func(*mcp.ProgressNotificationParams) {
+		_, err := h.u.Call(context.Background(), "", "sleep", json.RawMessage(`{"ms":60000}`), func(*mcp.ProgressNotificationParams) {
 			once.Do(func() { close(inFlight) })
 		})
 		callErr <- err
@@ -356,9 +354,21 @@ func TestCrashRestarts(t *testing.T) {
 	before := h.changeCount()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := h.u.Call(ctx, "crash", json.RawMessage(`{}`), nil); !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("crash call err = %v, want ErrUnavailable", err)
+	// The runner ends the POST stream without a response when the child
+	// dies, so the call fails with a transport error (the SDK's "request
+	// terminated without response"), not an answer from the upstream. It
+	// isn't mapped to ErrUnavailable: the session hasn't been seen to end
+	// yet, and the call may have had effects, so it's not retried either.
+	res, err := h.u.Call(ctx, "", "crash", json.RawMessage(`{}`), nil)
+	if err == nil {
+		t.Fatalf("crash call returned %+v, want an error", res)
 	}
+	var wire *jsonrpc.Error
+	if errors.As(err, &wire) {
+		t.Fatalf("crash call err = %v, want a transport failure, not a JSON-RPC error", err)
+	}
+	// The runner ends the session, so the GET stream's reconnect gets a 404
+	// and the session ends without any further call.
 	eventually(t, 10*time.Second, "tools nil after crash", func() bool { return h.sawDownAfter(before) })
 	h.waitUp(t)
 	if got := call(t, h.u, "echo", `{"text":"back"}`); got != "back" {
@@ -366,52 +376,101 @@ func TestCrashRestarts(t *testing.T) {
 	}
 }
 
-// failures counts "upstream start failed" style warnings for the fake upstream.
-func failures(t *testing.T, h *harness) int {
+// startFailures counts "upstream start failed" warnings for the fake upstream.
+func startFailures(t *testing.T, h *harness) int {
 	n := 0
 	for _, r := range h.logs.records(t) {
-		if r["upstream"] == h.u.Name() && r["level"] == "WARN" {
+		if r["upstream"] == h.u.Name() && r["msg"] == "upstream start failed" {
 			n++
 		}
 	}
 	return n
 }
 
-func TestMissingCommandRetries(t *testing.T) {
-	h := start(t, func(o *Options) { o.Command = "/nonexistent" })
-	eventually(t, 10*time.Second, "at least 3 failed attempts logged", func() bool { return failures(t, h) >= 3 })
+func TestUnreachableRetries(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	h := startURL(t, "http://"+addr+"/mcp", nil)
+	eventually(t, 10*time.Second, "at least 2 failed attempts logged", func() bool { return startFailures(t, h) >= 2 })
 	select {
 	case <-h.runDone:
 		t.Fatal("Run returned early")
 	default:
 	}
 	if h.u.Tools() != nil {
-		t.Fatal("Tools() non-nil for missing command")
+		t.Fatal("Tools() non-nil for unreachable upstream")
 	}
-	_, err := h.u.Call(context.Background(), "echo", json.RawMessage(`{"text":"x"}`), nil)
+	_, err = h.u.Call(context.Background(), "", "echo", json.RawMessage(`{"text":"x"}`), nil)
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("err = %v, want ErrUnavailable", err)
 	}
 }
 
 func TestFailingStartThenRecovers(t *testing.T) {
-	failFile := filepath.Join(t.TempDir(), "fail")
-	if err := os.WriteFile(failFile, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	h := start(t, func(o *Options) {
-		o.Env = append(o.Env, "FAKE_FAIL_START="+failFile)
-	})
-	eventually(t, 10*time.Second, "at least 2 failed starts logged", func() bool { return failures(t, h) >= 2 })
+	var failing atomic.Bool
+	failing.Store(true)
+	h := startWith(t, testutil.RunnerOptions{Wrap: func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if failing.Load() {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}}, nil)
+	eventually(t, 10*time.Second, "at least 2 failed starts logged", func() bool { return startFailures(t, h) >= 2 })
 	if h.u.Tools() != nil {
 		t.Fatal("Tools() non-nil while start fails")
 	}
-	if err := os.Remove(failFile); err != nil {
-		t.Fatal(err)
-	}
+	failing.Store(false)
 	h.waitUp(t)
 	if got := call(t, h.u, "echo", `{"text":"ok"}`); got != "ok" {
 		t.Fatalf("echo = %q", got)
+	}
+}
+
+func TestBearerSent(t *testing.T) {
+	var mu sync.Mutex
+	var auths []string
+	record := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			auths = append(auths, r.Header.Get("Authorization"))
+			mu.Unlock()
+			next.ServeHTTP(w, r)
+		})
+	}
+	h := startWith(t, testutil.RunnerOptions{Wrap: record}, func(o *Options) { o.BearerToken = "tok" })
+	h.waitUp(t)
+	if got := call(t, h.u, "echo", `{"text":"hi"}`); got != "hi" {
+		t.Fatalf("echo = %q", got)
+	}
+	mu.Lock()
+	got := slices.Clone(auths)
+	mu.Unlock()
+	if len(got) < 3 {
+		t.Fatalf("only %d requests recorded", len(got))
+	}
+	for i, a := range got {
+		if a != "Bearer tok" {
+			t.Fatalf("request %d Authorization = %q, want Bearer tok", i, a)
+		}
+	}
+
+	// Runner requires a token the Dock doesn't have.
+	ro := testutil.RunnerOptions{Mod: func(o *runner.Options) { o.BearerToken = "tok" }}
+	h = startWith(t, ro, func(o *Options) { o.BearerToken = "wrong" })
+	for end := time.Now().Add(time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if h.u.Tools() != nil {
+			t.Fatal("upstream came up with the wrong bearer token")
+		}
+	}
+	if startFailures(t, h) == 0 {
+		t.Fatal("no start failure logged with the wrong bearer token")
 	}
 }
 
@@ -426,23 +485,6 @@ func TestListChanged(t *testing.T) {
 	call(t, h.u, "add_tool", `{}`)
 	eventually(t, 10*time.Second, "late tool listed", func() bool { return h.hasTool("late") })
 	eventually(t, 5*time.Second, "OnToolsChanged fired again", func() bool { return h.changeCount() > before })
-}
-
-func TestStderrLogged(t *testing.T) {
-	h := start(t, nil)
-	eventually(t, 10*time.Second, "stderr line logged", func() bool {
-		for _, r := range h.logs.records(t) {
-			if r["upstream"] != "fake" {
-				continue
-			}
-			for _, v := range r {
-				if s, ok := v.(string); ok && s == "hello stderr" {
-					return true
-				}
-			}
-		}
-		return false
-	})
 }
 
 func TestNextBackoff(t *testing.T) {
@@ -467,5 +509,545 @@ func TestNextBackoff(t *testing.T) {
 		if wait != c.cur || next != c.want {
 			t.Errorf("nextBackoff(%v, up %v) = %v,%v; want %v,%v", c.cur, c.up, wait, next, c.cur, c.want)
 		}
+	}
+}
+
+// expirer is a runner Wrap that makes the first session look gone: GETs get
+// 405 (so the SDK runs without a standalone stream and can't notice a lost
+// session on its own), and once expire is set every request carrying the
+// first session id gets 404, before the runner sees it. It counts tools/call
+// POSTs per session id.
+type expirer struct {
+	expire atomic.Bool
+
+	mu    sync.Mutex
+	first string         // first session id seen
+	calls map[string]int // tools/call POSTs per session id
+}
+
+func newExpirer() *expirer { return &expirer{calls: map[string]int{}} }
+
+func (x *expirer) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("Mcp-Session-Id")
+		isCall := false
+		if r.Method == http.MethodPost {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			isCall = bytes.Contains(body, []byte(`"tools/call"`))
+		}
+		x.mu.Lock()
+		if x.first == "" && id != "" {
+			x.first = id
+		}
+		if isCall {
+			x.calls[id]++
+		}
+		old := id != "" && id == x.first
+		x.mu.Unlock()
+		if r.Method == http.MethodGet {
+			http.Error(w, "no standalone stream", http.StatusMethodNotAllowed)
+			return
+		}
+		if old && x.expire.Load() {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// counts returns the tools/call POST count on the first session and per
+// other session id.
+func (x *expirer) counts() (first int, others map[string]int) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	others = map[string]int{}
+	for id, n := range x.calls {
+		if id == x.first {
+			first = n
+		} else {
+			others[id] = n
+		}
+	}
+	return first, others
+}
+
+func hasLog(t *testing.T, h *harness, msg string) bool {
+	return slices.ContainsFunc(h.logs.records(t), func(r map[string]any) bool { return r["msg"] == msg })
+}
+
+func readLines(t *testing.T, path string) []string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return strings.Fields(string(b))
+}
+
+// With no GET stream, only the ping notices the session is gone.
+func TestPingDetectsDeadSession(t *testing.T) {
+	x := newExpirer()
+	h := startWith(t, testutil.RunnerOptions{Wrap: x.wrap}, func(o *Options) { o.PingInterval = 100 * time.Millisecond })
+	h.waitUp(t)
+	before := h.changeCount()
+	x.expire.Store(true)
+	eventually(t, 3*time.Second, "down after expire", func() bool { return h.sawDownAfter(before) })
+	eventually(t, 3*time.Second, "up again", func() bool { return h.u.Tools() != nil })
+	if !hasLog(t, h, "upstream ping failed") {
+		t.Fatal("no upstream ping failed log")
+	}
+	if first, others := x.counts(); first != 0 || len(others) != 0 {
+		t.Fatalf("tool calls made: first %d, others %v", first, others)
+	}
+}
+
+// A call on a session the runner no longer knows gets 404 before reaching a
+// child, so it's retried once on the new session.
+func TestRetryOnSessionMissing(t *testing.T) {
+	x := newExpirer()
+	h := startWith(t, testutil.RunnerOptions{Wrap: x.wrap}, func(o *Options) { o.PingInterval = time.Hour })
+	h.waitUp(t)
+	x.expire.Store(true)
+	if got := call(t, h.u, "echo", `{"text":"hi"}`); got != "hi" {
+		t.Fatalf("echo = %q, want hi", got)
+	}
+	first, others := x.counts()
+	if first != 1 || len(others) != 1 {
+		t.Fatalf("tools/call POSTs: first session %d, others %v; want 1 and one other with 1", first, others)
+	}
+	for id, n := range others {
+		if n != 1 {
+			t.Fatalf("session %s got %d tools/call POSTs, want 1", id, n)
+		}
+	}
+}
+
+// A call that reached the child is never retried, even though the child
+// died with it.
+func TestNoRetryAfterSend(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "calls")
+	h := startWith(t, childEnv("FAKE_CALL_LOG="+log), nil)
+	h.waitUp(t)
+	before := h.changeCount()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if res, err := h.u.Call(ctx, "", "crash", json.RawMessage(`{}`), nil); err == nil {
+		t.Fatalf("crash call returned %+v, want an error", res)
+	}
+	eventually(t, 10*time.Second, "down after crash", func() bool { return h.sawDownAfter(before) })
+	h.waitUp(t)
+	n := 0
+	for _, l := range readLines(t, log) {
+		if l == "crash" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("crash ran %d times, want 1 (log %v)", n, readLines(t, log))
+	}
+}
+
+// A call already in flight when another request finds the session gone was
+// sent, so it must not be retried. jsonrpc2 may retire such a call with the
+// conn's session-missing error; with go-sdk v1.8.0 it's instead ended by the
+// teardown (context canceled), so this passes even without Call's
+// reached check; TestRetryable and TestTransportMarksReached pin that check.
+// It's here so a change in either doesn't go unnoticed.
+func TestNoRetryInFlightOnSessionMissing(t *testing.T) {
+	x := newExpirer()
+	log := filepath.Join(t.TempDir(), "calls")
+	ro := childEnv("FAKE_CALL_LOG=" + log)
+	ro.Wrap = x.wrap
+	h := startWith(t, ro, func(o *Options) { o.PingInterval = time.Hour })
+	h.waitUp(t)
+	slowErr := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := h.u.Call(ctx, "", "sleep", json.RawMessage(`{"ms":1500}`), nil)
+		slowErr <- err
+	}()
+	// No GET stream, so no progress either (the runner relays child
+	// notifications on it); the call log shows the child got the call.
+	eventually(t, 10*time.Second, "sleep reached the child", func() bool {
+		return slices.Contains(readLines(t, log), "sleep")
+	})
+	x.expire.Store(true)
+	if got := call(t, h.u, "echo", `{"text":"hi"}`); got != "hi" {
+		t.Fatalf("echo = %q, want hi", got)
+	}
+	select {
+	case err := <-slowErr:
+		if err == nil {
+			t.Fatal("in-flight sleep succeeded after its session was lost")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight sleep never returned")
+	}
+	// Give a wrongly retried sleep time to show up in the log.
+	time.Sleep(300 * time.Millisecond)
+	n := 0
+	for _, l := range readLines(t, log) {
+		if l == "sleep" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("sleep ran %d times, want 1 (log %v)", n, readLines(t, log))
+	}
+}
+
+// callAs is call with a user.
+func callAs(t *testing.T, u *Upstream, user, tool, args string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res, err := u.Call(ctx, user, tool, json.RawMessage(args), nil)
+	if err != nil {
+		t.Fatalf("Call(%s as %q): %v", tool, user, err)
+	}
+	if res.IsError {
+		t.Fatalf("Call(%s as %q) returned tool error: %+v", tool, user, res.Content)
+	}
+	return textOf(t, res)
+}
+
+func TestIdentityMeta(t *testing.T) {
+	h := start(t, nil)
+	h.waitUp(t)
+	if got := callAs(t, h.u, "github:alice", "whoami", `{}`); got != `{"id":"alice","provider":"github"}` {
+		t.Fatalf("whoami as github:alice = %s", got)
+	}
+	want := `{"id":"https://wallet.example/alice","provider":"open_payments"}`
+	if got := callAs(t, h.u, "open_payments:https://wallet.example/alice", "whoami", `{}`); got != want {
+		t.Fatalf("whoami as wallet = %s, want %s", got, want)
+	}
+}
+
+// reqHeaders is what a headerRecorder saw for one POST.
+type reqHeaders struct {
+	method   string // JSON-RPC method, "" if the body has none
+	session  string
+	provider string
+	id       string
+	has      bool // either identity header present
+}
+
+// headerRecorder is a runner Wrap that records the identity headers of
+// every POST along with its JSON-RPC method.
+type headerRecorder struct {
+	mu   sync.Mutex
+	reqs []reqHeaders
+}
+
+func (r *headerRecorder) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodPost {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			req.Body = io.NopCloser(bytes.NewReader(body))
+			var msg struct {
+				Method string `json:"method"`
+			}
+			_ = json.Unmarshal(body, &msg)
+			_, hp := req.Header[http.CanonicalHeaderKey(HeaderUserProvider)]
+			_, hi := req.Header[http.CanonicalHeaderKey(HeaderUserID)]
+			r.mu.Lock()
+			r.reqs = append(r.reqs, reqHeaders{
+				method:   msg.Method,
+				session:  req.Header.Get("Mcp-Session-Id"),
+				provider: req.Header.Get(HeaderUserProvider),
+				id:       req.Header.Get(HeaderUserID),
+				has:      hp || hi,
+			})
+			r.mu.Unlock()
+		}
+		next.ServeHTTP(w, req)
+	})
+}
+
+func (r *headerRecorder) byMethod(m string) []reqHeaders {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []reqHeaders
+	for _, x := range r.reqs {
+		if x.method == m {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+func TestIdentityHeaders(t *testing.T) {
+	rec := &headerRecorder{}
+	h := startWith(t, testutil.RunnerOptions{Wrap: rec.wrap}, nil)
+	h.waitUp(t)
+	callAs(t, h.u, "github:alice", "whoami", `{}`)
+	calls := rec.byMethod("tools/call")
+	if len(calls) != 1 {
+		t.Fatalf("%d tools/call POSTs, want 1", len(calls))
+	}
+	if calls[0].provider != "github" || calls[0].id != "alice" {
+		t.Fatalf("tools/call headers provider=%q id=%q, want github alice", calls[0].provider, calls[0].id)
+	}
+	for _, m := range []string{"initialize", "tools/list"} {
+		rs := rec.byMethod(m)
+		if len(rs) == 0 {
+			t.Fatalf("no %s POST recorded", m)
+		}
+		for _, r := range rs {
+			if r.has {
+				t.Fatalf("%s POST carries identity headers: %+v", m, r)
+			}
+		}
+	}
+}
+
+// The retried POST carries the same identity as the first one.
+func TestIdentityHeadersOnRetry(t *testing.T) {
+	x := newExpirer()
+	rec := &headerRecorder{}
+	h := startWith(t, testutil.RunnerOptions{Wrap: func(next http.Handler) http.Handler { return rec.wrap(x.wrap(next)) }},
+		func(o *Options) { o.PingInterval = time.Hour })
+	h.waitUp(t)
+	x.expire.Store(true)
+	if got := callAs(t, h.u, "github:alice", "whoami", `{}`); got != `{"id":"alice","provider":"github"}` {
+		t.Fatalf("whoami after retry = %s", got)
+	}
+	calls := rec.byMethod("tools/call")
+	if len(calls) != 2 || calls[0].session == calls[1].session {
+		t.Fatalf("tools/call POSTs %+v, want 2 on different sessions", calls)
+	}
+	for i, c := range calls {
+		if c.provider != "github" || c.id != "alice" {
+			t.Fatalf("tools/call %d headers provider=%q id=%q, want github alice", i, c.provider, c.id)
+		}
+	}
+}
+
+func TestNoIdentity(t *testing.T) {
+	rec := &headerRecorder{}
+	h := startWith(t, testutil.RunnerOptions{Wrap: rec.wrap}, nil)
+	h.waitUp(t)
+	for _, user := range []string{"", "-", "alice", "unknown:alice", "github:"} {
+		if got := callAs(t, h.u, user, "whoami", `{}`); got != "<none>" {
+			t.Fatalf("whoami as %q = %s, want <none>", user, got)
+		}
+	}
+	calls := rec.byMethod("tools/call")
+	if len(calls) != 5 {
+		t.Fatalf("%d tools/call POSTs, want 5", len(calls))
+	}
+	for i, c := range calls {
+		if c.has {
+			t.Fatalf("tools/call %d carries identity headers: %+v", i, c)
+		}
+	}
+}
+
+// An id that isn't a valid header value still goes in _meta, but no
+// identity headers are sent and the call works.
+func TestIdentityUnsafeHeaderValue(t *testing.T) {
+	rec := &headerRecorder{}
+	h := startWith(t, testutil.RunnerOptions{Wrap: rec.wrap}, nil)
+	h.waitUp(t)
+	user := "github:alice\r\nX-Evil: 1"
+	want := `{"id":"alice\r\nX-Evil: 1","provider":"github"}`
+	if got := callAs(t, h.u, user, "whoami", `{}`); got != want {
+		t.Fatalf("whoami = %q, want %q", got, want)
+	}
+	calls := rec.byMethod("tools/call")
+	if len(calls) != 1 || calls[0].has {
+		t.Fatalf("tools/call POSTs %+v, want 1 without identity headers", calls)
+	}
+}
+
+func TestCallParamsMerge(t *testing.T) {
+	args := json.RawMessage(`{"text":"hi"}`)
+	alice := map[string]any{"provider": "github", "id": "alice"}
+
+	p := callParams("echo", args, "github:alice", "tok-1")
+	if p.Name != "echo" || string(p.Arguments.(json.RawMessage)) != `{"text":"hi"}` {
+		t.Fatalf("params = %+v", p)
+	}
+	if p.GetProgressToken() != "tok-1" {
+		t.Fatalf("progress token = %v", p.GetProgressToken())
+	}
+	if got, _ := p.Meta[UserMetaKey].(map[string]any); !maps.Equal(got, alice) {
+		t.Fatalf("meta[%s] = %v", UserMetaKey, p.Meta[UserMetaKey])
+	}
+	if len(p.Meta) != 2 {
+		t.Fatalf("meta = %v, want 2 keys", p.Meta)
+	}
+
+	p = callParams("echo", args, "", "tok-1")
+	if len(p.Meta) != 1 || p.GetProgressToken() != "tok-1" {
+		t.Fatalf("no user: meta = %v", p.Meta)
+	}
+
+	p = callParams("echo", args, "github:alice", "")
+	if got, _ := p.Meta[UserMetaKey].(map[string]any); len(p.Meta) != 1 || !maps.Equal(got, alice) {
+		t.Fatalf("no token: meta = %v", p.Meta)
+	}
+
+	if p = callParams("echo", nil, "-", ""); p.Meta != nil || p.Arguments != nil {
+		t.Fatalf("nothing: params = %+v", p)
+	}
+}
+
+// A redirect from the upstream is never followed: the transport adds the
+// bearer and identity headers on every hop, so following one would hand them
+// (and the request body) to whatever host the redirect names.
+func TestRedirectNotFollowed(t *testing.T) {
+	var hits atomic.Int32
+	var leaked atomic.Value
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		leaked.Store(r.Header.Get("Authorization") + "|" + r.Header.Get(HeaderUserProvider))
+		http.Error(w, "nope", http.StatusTeapot)
+	}))
+	t.Cleanup(other.Close)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/mcp", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+	for _, name := range []string{"default client", "caller client"} {
+		t.Run(name, func(t *testing.T) {
+			h := startURL(t, redirector.URL+"/mcp", func(o *Options) {
+				o.BearerToken = "tok"
+				if name == "caller client" {
+					// Even one that asks to follow every redirect.
+					o.HTTPClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }}
+				}
+			})
+			eventually(t, 10*time.Second, "failed start logged", func() bool { return startFailures(t, h) >= 1 })
+			if h.u.Tools() != nil {
+				t.Fatal("upstream came up through a redirect")
+			}
+			if n := hits.Load(); n != 0 {
+				t.Fatalf("redirect target contacted %d times (headers %v)", n, leaked.Load())
+			}
+		})
+	}
+}
+
+// retryable is the only thing that stops a call that was sent from being
+// sent again: jsonrpc2 retires in-flight calls with the conn's
+// ErrSessionMissing once any request gets the 404.
+func TestRetryable(t *testing.T) {
+	wrapped := fmt.Errorf("calling tools/call: %w", mcp.ErrSessionMissing)
+	for _, tc := range []struct {
+		name    string
+		err     error
+		reached bool
+		ctxErr  error
+		want    bool
+	}{
+		{"session missing, not reached", mcp.ErrSessionMissing, false, nil, true},
+		{"wrapped session missing, not reached", wrapped, false, nil, true},
+		{"session missing, reached", mcp.ErrSessionMissing, true, nil, false},
+		{"wrapped session missing, reached", wrapped, true, nil, false},
+		{"other error, not reached", errors.New("boom"), false, nil, false},
+		{"connection closed, not reached", mcp.ErrConnectionClosed, false, nil, false},
+		{"rpc error, not reached", &jsonrpc.Error{Code: -32000, Message: "x"}, false, nil, false},
+		{"session missing, ctx canceled", mcp.ErrSessionMissing, false, context.Canceled, false},
+		{"session missing, ctx deadline", wrapped, false, context.DeadlineExceeded, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retryable(tc.err, tc.reached, tc.ctxErr); got != tc.want {
+				t.Fatalf("retryable(%v, %v, %v) = %v, want %v", tc.err, tc.reached, tc.ctxErr, got, tc.want)
+			}
+		})
+	}
+}
+
+type stubRT struct {
+	status int
+	err    error
+}
+
+func (s stubRT) RoundTrip(*http.Request) (*http.Response, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &http.Response{StatusCode: s.status, Body: http.NoBody, Header: http.Header{}}, nil
+}
+
+// headerTransport marks an attempt reached unless its POST got a 404 for
+// the session id.
+func TestTransportMarksReached(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		method  string
+		rt      stubRT
+		attempt bool
+		want    bool
+	}{
+		{"POST 200", http.MethodPost, stubRT{status: http.StatusOK}, true, true},
+		{"POST 202", http.MethodPost, stubRT{status: http.StatusAccepted}, true, true},
+		{"POST 500", http.MethodPost, stubRT{status: http.StatusInternalServerError}, true, true},
+		{"POST 404", http.MethodPost, stubRT{status: http.StatusNotFound}, true, false},
+		{"POST transport error", http.MethodPost, stubRT{err: errors.New("reset")}, true, true},
+		{"GET 200", http.MethodGet, stubRT{status: http.StatusOK}, true, false},
+		{"DELETE 200", http.MethodDelete, stubRT{status: http.StatusOK}, true, false},
+		{"POST 200 without attempt", http.MethodPost, stubRT{status: http.StatusOK}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &attempt{}
+			ctx := context.Background()
+			if tc.attempt {
+				ctx = context.WithValue(ctx, attemptKey{}, a)
+			}
+			req, err := http.NewRequestWithContext(ctx, tc.method, "http://upstream.invalid/mcp", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := &headerTransport{base: tc.rt, bearer: "tok"}
+			if resp, err := tr.RoundTrip(req); err == nil {
+				resp.Body.Close()
+			}
+			if got := a.reached.Load(); got != tc.want {
+				t.Fatalf("reached = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Pings keep going while a call runs, and a call longer than the ping
+// interval isn't cut off by them.
+func TestLongCallSurvivesPings(t *testing.T) {
+	var pings atomic.Int32
+	count := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				b, _ := io.ReadAll(r.Body)
+				if bytes.Contains(b, []byte(`"method":"ping"`)) {
+					pings.Add(1)
+				}
+				r.Body = io.NopCloser(bytes.NewReader(b))
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	h := startWith(t, testutil.RunnerOptions{Wrap: count}, func(o *Options) { o.PingInterval = 50 * time.Millisecond })
+	h.waitUp(t)
+	before, p0 := h.changeCount(), pings.Load()
+	if got := call(t, h.u, "sleep", `{"ms":1500}`); got != "done" {
+		t.Fatalf("sleep = %q, want done", got)
+	}
+	if n := pings.Load() - p0; n < 5 {
+		t.Fatalf("%d pings during a 1.5s call, want at least 5", n)
+	}
+	if h.sawDownAfter(before) || hasLog(t, h, "upstream ping failed") {
+		t.Fatal("upstream went down during a long call")
 	}
 }

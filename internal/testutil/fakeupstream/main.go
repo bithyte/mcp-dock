@@ -1,21 +1,27 @@
 // Command fakeupstream is a stdio MCP server used by tests.
 //
-// Tools: echo, sleep, crash, getenv, cwd, notify, add_tool (registers "late").
+// Tools: echo, sleep, crash, getenv, cwd, notify, add_tool (registers "late"),
+// whoami (the JSON of params._meta[upstream.UserMetaKey], or <none>).
 // Env:
 //
 //	FAKE_CANCEL_FILE  sleep writes "cancelled" here when its context is cancelled
 //	FAKE_LONG_TOOL=1  adds a tool whose name is 70 chars long
 //	FAKE_FAIL_START   exit 1 immediately while the named file exists
+//	FAKE_CALL_LOG     append "<tool name>\n" here before each tool call runs
+//	FAKE_EXIT_WHEN    exit 1 once the named file appears (deleting it first)
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/bithyte/mcp-dock/internal/upstream"
 )
 
 // longToolName is 70 characters, too long once prefixed by the gateway.
@@ -57,8 +63,14 @@ func main() {
 		}
 	}
 	fmt.Fprintln(os.Stderr, "hello stderr")
+	if f := os.Getenv("FAKE_EXIT_WHEN"); f != "" {
+		go exitWhen(f)
+	}
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "fakeupstream", Version: "0.0.1"}, nil)
+	if f := os.Getenv("FAKE_CALL_LOG"); f != "" {
+		s.AddReceivingMiddleware(callLog(f))
+	}
 
 	mcp.AddTool(s, &mcp.Tool{Name: "echo", Description: "returns text"},
 		func(_ context.Context, _ *mcp.CallToolRequest, in echoIn) (*mcp.CallToolResult, any, error) {
@@ -131,6 +143,19 @@ func main() {
 			return text("added"), nil, nil
 		})
 
+	mcp.AddTool(s, &mcp.Tool{Name: "whoami", Description: "returns the caller identity from _meta"},
+		func(_ context.Context, req *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, any, error) {
+			v, ok := req.Params.Meta[upstream.UserMetaKey]
+			if !ok {
+				return text("<none>"), nil, nil
+			}
+			b, err := json.Marshal(v)
+			if err != nil {
+				return nil, nil, err
+			}
+			return text(string(b)), nil, nil
+		})
+
 	if os.Getenv("FAKE_LONG_TOOL") == "1" {
 		mcp.AddTool(s, &mcp.Tool{Name: longToolName, Description: "name is 70 chars"},
 			func(context.Context, *mcp.CallToolRequest, empty) (*mcp.CallToolResult, any, error) {
@@ -141,5 +166,40 @@ func main() {
 	if err := s.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		fmt.Fprintln(os.Stderr, "server stopped:", err)
 		os.Exit(1)
+	}
+}
+
+// exitWhen polls for path and exits once it exists, removing it first so the
+// next child doesn't exit too.
+func exitWhen(path string) {
+	for range time.Tick(20 * time.Millisecond) {
+		if _, err := os.Stat(path); err == nil {
+			_ = os.Remove(path)
+			fmt.Fprintln(os.Stderr, "exit: file present")
+			os.Exit(1)
+		}
+	}
+}
+
+// callLog appends each tools/call's tool name to path before the handler
+// runs.
+func callLog(path string) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if r, ok := req.(*mcp.CallToolRequest); ok && method == "tools/call" {
+				f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+				if err != nil {
+					return nil, err
+				}
+				_, err = fmt.Fprintln(f, r.Params.Name)
+				if cerr := f.Close(); err == nil {
+					err = cerr
+				}
+				if err != nil {
+					return nil, err
+				}
+			}
+			return next(ctx, method, req)
+		}
 	}
 }

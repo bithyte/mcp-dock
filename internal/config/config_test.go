@@ -33,11 +33,8 @@ allowed_users:
   open_payments: ["$ilp.interledger-test.dev/alice"]
 upstreams:
   - name: jaypost
-    command: jaypost
-    args: ["mcp"]
-    env:
-      JAYPOST_URL: http://127.0.0.1:8787
-    env_from: [JAYPOST_TOKEN]
+    url: http://jaypost:8080/mcp
+    bearer_token_env: JAYPOST_RUNNER_TOKEN
     deny_args: [attachment.path]
 `
 
@@ -56,7 +53,7 @@ func write(t *testing.T, s string) string {
 
 var goodPEM, _ = testutil.Ed25519PEM(&testing.T{})
 
-var goodEnv = map[string]string{"GITHUB_CLIENT_SECRET": "s", "JAYPOST_TOKEN": "t", "OP_PRIVATE_KEY": goodPEM}
+var goodEnv = map[string]string{"GITHUB_CLIENT_SECRET": "s", "JAYPOST_RUNNER_TOKEN": "t", "OP_PRIVATE_KEY": goodPEM}
 
 func TestLoadValid(t *testing.T) {
 	c, err := Load("../../config.example.yaml", env(goodEnv))
@@ -103,17 +100,12 @@ func TestLoadRejects(t *testing.T) {
 		{"public_url empty fragment", r("https://mcp.example.com/", "\"https://mcp.example.com/#\"").Replace(validYAML), "public_url", goodEnv},
 		{"missing data_dir", r("data_dir: /var/lib/mcp-dock\n", "").Replace(validYAML), "data_dir", goodEnv},
 		{"missing client_id", r("client_id: Ov23liXXXXXXXXXXXXXX", "client_id: \"\"").Replace(validYAML), "client_id", goodEnv},
-		{"secret env empty", validYAML, "client_secret_env", map[string]string{"JAYPOST_TOKEN": "t"}},
+		{"secret env empty", validYAML, "client_secret_env", map[string]string{"JAYPOST_RUNNER_TOKEN": "t"}},
 		{"name uppercase", r("name: jaypost", "name: Jay").Replace(validYAML), "name", goodEnv},
 		{"name double underscore", r("name: jaypost", "name: jay__post").Replace(validYAML), "name", goodEnv},
 		{"name empty", r("name: jaypost", "name: \"\"").Replace(validYAML), "name", goodEnv},
 		{"name trailing dash", r("name: jaypost", "name: a-").Replace(validYAML), "name", goodEnv},
-		{"duplicate names", validYAML + "  - name: jaypost\n    command: x\n", "duplicate", goodEnv},
-		{"empty command", r("command: jaypost", "command: \"\"").Replace(validYAML), "command", goodEnv},
-		{"relative command dot", r("command: jaypost", "command: ./bin/jaypost").Replace(validYAML), "absolute or on PATH", goodEnv},
-		{"relative command dir", r("command: jaypost", "command: bin/jaypost").Replace(validYAML), "absolute or on PATH", goodEnv},
-		{"relative command parent", r("command: jaypost", "command: ../jaypost").Replace(validYAML), "absolute or on PATH", goodEnv},
-		{"env_from unset", validYAML, "JAYPOST_TOKEN", map[string]string{"GITHUB_CLIENT_SECRET": "s", "OP_PRIVATE_KEY": goodPEM}},
+		{"duplicate names", validYAML + "  - name: jaypost\n    url: http://x/mcp\n", "duplicate", goodEnv},
 		{"deny_args empty", r("[attachment.path]", "[\"\"]").Replace(validYAML), "deny_args", goodEnv},
 		{"deny_args dotdot", r("[attachment.path]", "[a..b]").Replace(validYAML), "deny_args", goodEnv},
 		{"deny_args trailing dot", r("[attachment.path]", "[\"attachment.\"]").Replace(validYAML), "deny_args", goodEnv},
@@ -128,7 +120,7 @@ func TestLoadRejects(t *testing.T) {
 		{"wallet http", r("$ilp.interledger-test.dev/mcp", "http://ilp.example/mcp").Replace(validYAML), "wallet_address", goodEnv},
 		{"wallet empty", r("wallet_address: $ilp.interledger-test.dev/mcp", "wallet_address: \"\"").Replace(validYAML), "wallet_address", goodEnv},
 		{"key_id empty", r("key_id: key-1", "key_id: \"\"").Replace(validYAML), "key_id", goodEnv},
-		{"key env unset", validYAML, "private_key_env", map[string]string{"GITHUB_CLIENT_SECRET": "s", "JAYPOST_TOKEN": "t"}},
+		{"key env unset", validYAML, "private_key_env", map[string]string{"GITHUB_CLIENT_SECRET": "s", "JAYPOST_RUNNER_TOKEN": "t"}},
 		{"key env file path", validYAML, "private_key_env", withKey(keyFile(t))},
 		{"key env rsa", validYAML, "private_key_env", withKey(rsaPEM(t))},
 		{"key env ecdsa", validYAML, "private_key_env", withKey(ecPEM(t))},
@@ -248,7 +240,7 @@ var (
 )
 
 func withKey(v string) map[string]string {
-	return map[string]string{"GITHUB_CLIENT_SECRET": "s", "JAYPOST_TOKEN": "t", "OP_PRIVATE_KEY": v}
+	return map[string]string{"GITHUB_CLIENT_SECRET": "s", "JAYPOST_RUNNER_TOKEN": "t", "OP_PRIVATE_KEY": v}
 }
 
 func keyFile(t *testing.T) string {
@@ -286,32 +278,6 @@ func ecPEM(t *testing.T) string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
 }
 
-func TestEnvironMinimal(t *testing.T) {
-	c, err := Load(write(t, validYAML), env(map[string]string{
-		"PATH": "/bin", "HOME": "/h", "JAYPOST_TOKEN": "t", "GITHUB_CLIENT_SECRET": "s", "OP_PRIVATE_KEY": goodPEM,
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := c.Upstreams[0].Environ(env(map[string]string{
-		"PATH": "/bin", "HOME": "/h", "JAYPOST_TOKEN": "t", "GITHUB_CLIENT_SECRET": "s", "OP_PRIVATE_KEY": goodPEM,
-	}))
-	set := map[string]bool{}
-	for _, kv := range got {
-		set[kv] = true
-	}
-	for _, want := range []string{"PATH=/bin", "HOME=/h", "JAYPOST_URL=http://127.0.0.1:8787", "JAYPOST_TOKEN=t"} {
-		if !set[want] {
-			t.Errorf("missing %q in %v", want, got)
-		}
-	}
-	for _, kv := range got {
-		if strings.HasPrefix(kv, "GITHUB_CLIENT_SECRET") {
-			t.Errorf("leaked %q", kv)
-		}
-	}
-}
-
 func TestDenyArgsAccepted(t *testing.T) {
 	y := strings.Replace(validYAML, "[attachment.path]", `[attachment.path, path, "a-b.c_d.Éé"]`, 1)
 	c, err := Load(write(t, y), env(goodEnv))
@@ -329,13 +295,82 @@ func TestAccepts(t *testing.T) {
 		{"public_url root slash", validYAML},
 		{"public_url no slash", r("https://mcp.example.com/", "https://mcp.example.com").Replace(validYAML)},
 		{"public_url port", r("https://mcp.example.com/", "http://127.0.0.1:8080/").Replace(validYAML)},
-		{"command bare", validYAML},
-		{"command absolute", r("command: jaypost", "command: /usr/local/bin/jaypost").Replace(validYAML)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := Load(write(t, tc.yaml), env(goodEnv)); err != nil {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// upstreamYAML is a minimal config with one upstream whose body is given.
+func upstreamYAML(body string) string {
+	return githubOnly + "upstreams:\n  - name: up\n" + body
+}
+
+func TestUpstreamURL(t *testing.T) {
+	for _, u := range []string{"http://jaypost:8080/mcp", "https://h/mcp/", "http://h:1"} {
+		c, err := Load(write(t, upstreamYAML("    url: \""+u+"\"\n")), env(goodEnv))
+		if err != nil {
+			t.Fatalf("%s: %v", u, err)
+		}
+		if got := c.Upstreams[0].URL; got != u {
+			t.Fatalf("URL = %q, want %q", got, u)
+		}
+	}
+	for _, u := range []string{"ftp://h", "http://", "http://u:p@h/mcp", "http://h/mcp?key=x", "http://h/mcp?", "http://h/mcp#f", ""} {
+		_, err := Load(write(t, upstreamYAML("    url: \""+u+"\"\n")), env(goodEnv))
+		if err == nil || !strings.Contains(err.Error(), "upstreams[0].url") {
+			t.Fatalf("%q: err = %v, want one naming upstreams[0].url", u, err)
+		}
+	}
+	// url missing entirely
+	_, err := Load(write(t, upstreamYAML("    deny_args: [a]\n")), env(goodEnv))
+	if err == nil || !strings.Contains(err.Error(), "upstreams[0].url") {
+		t.Fatalf("missing url: err = %v", err)
+	}
+}
+
+func TestUpstreamBearerEnv(t *testing.T) {
+	y := upstreamYAML("    url: http://h/mcp\n    bearer_token_env: RUNNER_TOK\n")
+	c, err := Load(write(t, y), env(map[string]string{"GITHUB_CLIENT_SECRET": "s", "RUNNER_TOK": "tok"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Upstreams[0].BearerToken; got != "tok" {
+		t.Fatalf("BearerToken = %q", got)
+	}
+	c, err = Load(write(t, upstreamYAML("    url: http://h/mcp\n")), env(goodEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Upstreams[0].BearerToken != "" {
+		t.Fatalf("BearerToken = %q without bearer_token_env", c.Upstreams[0].BearerToken)
+	}
+	want := "upstreams[0].bearer_token_env: env var RUNNER_TOK is empty or unset"
+	for name, e := range map[string]map[string]string{
+		"unset": {"GITHUB_CLIENT_SECRET": "s"},
+		"empty": {"GITHUB_CLIENT_SECRET": "s", "RUNNER_TOK": ""},
+	} {
+		_, err := Load(write(t, y), env(e))
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s: err = %v, want %q", name, err, want)
+		}
+	}
+}
+
+func TestUpstreamOldShapeRejected(t *testing.T) {
+	for field, body := range map[string]string{
+		"command":  "    command: jaypost\n",
+		"args":     "    args: [mcp]\n",
+		"env":      "    env:\n      A: b\n",
+		"env_from": "    env_from: [A]\n",
+	} {
+		_, err := Load(write(t, upstreamYAML("    url: http://h/mcp\n"+body)), env(goodEnv))
+		want := "config: upstreams[0]." + field + ": stdio upstreams moved to mcp-runner; run the server in an mcp-runner container and set url: instead"
+		if err == nil || err.Error() != want {
+			t.Fatalf("%s: err = %v, want %q", field, err, want)
+		}
 	}
 }

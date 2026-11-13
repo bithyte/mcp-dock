@@ -21,12 +21,11 @@ allowed_users:
     - $ilp.interledger-test.dev/alice
 
 upstreams:
+  # Each upstream is a streamable HTTP MCP endpoint, usually an mcp-runner
+  # container in front of a stdio server.
   - name: jaypost
-    command: jaypost
-    args: ["mcp"]
-    env:
-      JAYPOST_URL: http://127.0.0.1:8787
-    env_from:
-      - JAYPOST_TOKEN
+    url: http://jaypost:8080/mcp
+    # Optional: env var holding the runner's bearer token.
+    bearer_token_env: JAYPOST_RUNNER_TOKEN
     deny_args:
       - attachment.path

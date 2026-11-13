@@ -12,9 +12,7 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -59,13 +57,14 @@ type GitHubConfig struct {
 	ClientSecret    string `yaml:"-"`
 }
 
+// UpstreamConfig is one streamable HTTP upstream, usually an mcp-runner.
 type UpstreamConfig struct {
-	Name     string            `yaml:"name"`
-	Command  string            `yaml:"command"`
-	Args     []string          `yaml:"args"`
-	Env      map[string]string `yaml:"env"`
-	EnvFrom  []string          `yaml:"env_from"`
-	DenyArgs []string          `yaml:"deny_args"`
+	Name           string `yaml:"name"`
+	URL            string `yaml:"url"` // kept verbatim, not normalized
+	BearerTokenEnv string `yaml:"bearer_token_env"`
+	// BearerToken is resolved from BearerTokenEnv at load; empty if unset.
+	BearerToken string   `yaml:"-"`
+	DenyArgs    []string `yaml:"deny_args"`
 }
 
 var nameRe = regexp.MustCompile(`^[a-z0-9]+([_-][a-z0-9]+)*$`)
@@ -118,7 +117,8 @@ func (c *Config) validate(getenv func(string) string) error {
 		return err
 	}
 	seen := map[string]bool{}
-	for i, up := range c.Upstreams {
+	for i := range c.Upstreams {
+		up := &c.Upstreams[i]
 		p := fmt.Sprintf("upstreams[%d]", i)
 		if !nameRe.MatchString(up.Name) || strings.Contains(up.Name, "__") {
 			return fmt.Errorf("%s.name %q invalid: use lowercase letters, digits, single _ or -", p, up.Name)
@@ -127,17 +127,13 @@ func (c *Config) validate(getenv func(string) string) error {
 			return fmt.Errorf("%s.name %q is a duplicate", p, up.Name)
 		}
 		seen[up.Name] = true
-		if up.Command == "" {
-			return fmt.Errorf("%s.command is required", p)
+		if err := checkUpstreamURL(up.URL); err != nil {
+			return fmt.Errorf("%s.url: %w", p, err)
 		}
-		// Upstreams run in an empty working dir, so a relative path like
-		// ./bin/x would resolve against that dir and never be found.
-		if strings.Contains(up.Command, "/") && !filepath.IsAbs(up.Command) {
-			return fmt.Errorf("%s.command %q must be absolute or on PATH (a bare name); relative paths don't work because upstreams run in an empty working dir", p, up.Command)
-		}
-		for _, v := range up.EnvFrom {
-			if getenv(v) == "" {
-				return fmt.Errorf("%s.env_from: env var %s is empty or unset", p, v)
+		if up.BearerTokenEnv != "" {
+			up.BearerToken = getenv(up.BearerTokenEnv)
+			if up.BearerToken == "" {
+				return fmt.Errorf("%s.bearer_token_env: env var %s is empty or unset", p, up.BearerTokenEnv)
 			}
 		}
 		for _, d := range up.DenyArgs {
@@ -149,7 +145,33 @@ func (c *Config) validate(getenv func(string) string) error {
 	return nil
 }
 
-// rejectOldShape gives a targeted error for the pre-providers config layout.
+// checkUpstreamURL checks s is an absolute http(s) URL with a host and no
+// userinfo, query or fragment. Credentials go through bearer_token_env, so
+// none end up in config.yaml or in logged URLs.
+func checkUpstreamURL(s string) error {
+	if s == "" {
+		return errors.New("is required")
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return fmt.Errorf("invalid URL %q", s)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("must be an http or https URL, got %q", s)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("must have a host, got %q", s)
+	}
+	if u.User != nil {
+		return errors.New("must not contain userinfo; use bearer_token_env for credentials")
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(s, "?#") {
+		return fmt.Errorf("must not have a query or fragment, got %q; use bearer_token_env for credentials", s)
+	}
+	return nil
+}
+
+// rejectOldShape gives a targeted error for older config layouts.
 func rejectOldShape(data []byte) error {
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
@@ -160,6 +182,18 @@ func rejectOldShape(data []byte) error {
 	}
 	if _, ok := raw["allowed_users"].([]any); ok {
 		return errors.New("config: allowed_users is now per provider, e.g. allowed_users.github: [...]")
+	}
+	ups, _ := raw["upstreams"].([]any)
+	for i, up := range ups {
+		m, ok := up.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, k := range []string{"command", "args", "env", "env_from"} {
+			if _, ok := m[k]; ok {
+				return fmt.Errorf("config: upstreams[%d].%s: stdio upstreams moved to mcp-runner; run the server in an mcp-runner container and set url: instead", i, k)
+			}
+		}
 	}
 	return nil
 }
@@ -289,29 +323,3 @@ func (c *Config) IsAllowed(userID string) bool {
 
 // ResourceURL is the MCP endpoint, also the OAuth resource.
 func (c *Config) ResourceURL() string { return c.PublicURL + "/mcp" }
-
-// Environ builds the minimal upstream process env as "K=V" entries.
-func (u UpstreamConfig) Environ(getenv func(string) string) []string {
-	m := map[string]string{}
-	for _, k := range []string{"PATH", "HOME"} {
-		if v := getenv(k); v != "" {
-			m[k] = v
-		}
-	}
-	for k, v := range u.Env {
-		m[k] = v
-	}
-	for _, k := range u.EnvFrom {
-		m[k] = getenv(k)
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	out := make([]string, 0, len(keys))
-	for _, k := range keys {
-		out = append(out, k+"="+m[k])
-	}
-	return out
-}

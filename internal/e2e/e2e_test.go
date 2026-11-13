@@ -1,5 +1,6 @@
-// Package e2e runs the whole gateway (oauth, gateway, a real stdio upstream)
-// behind the real HTTP handler and drives it with the SDK client.
+// Package e2e runs the whole gateway (oauth, gateway, a real stdio upstream
+// behind an in-process mcp-runner) behind the real HTTP handler and drives
+// it with the SDK client.
 package e2e
 
 import (
@@ -12,6 +13,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -31,8 +33,10 @@ import (
 	"github.com/bithyte/mcp-dock/internal/app"
 	"github.com/bithyte/mcp-dock/internal/config"
 	"github.com/bithyte/mcp-dock/internal/identity"
+	"github.com/bithyte/mcp-dock/internal/runner"
 	"github.com/bithyte/mcp-dock/internal/store"
 	"github.com/bithyte/mcp-dock/internal/testutil"
+	"github.com/bithyte/mcp-dock/internal/upstream"
 )
 
 func TestMain(m *testing.M) {
@@ -92,16 +96,37 @@ type env struct {
 	st   *store.Store
 	// aliceWallet is the normalized address of the fake's "alice" wallet.
 	aliceWallet string
+	// fakeURL is the runner endpoint behind the "fake" upstream.
+	fakeURL string
 }
 
-// newEnv starts the full gateway with the fake upstream as "fake"
-// (deny_args [attachment.path]) plus any extra upstreams. Both login
+// envOpts customizes the "fake" upstream in newEnvWith.
+type envOpts struct {
+	runner testutil.RunnerOptions // for the fake's runner
+	bearer string                 // Dock-side token for the fake, via bearer_token_env
+}
+
+// newEnv starts the full gateway with the fake upstream (behind a runner) as
+// "fake" (deny_args [attachment.path]) plus any extra upstreams. Both login
 // providers are on. Allowlists: GitHub alice and friend, and the fake
 // wallet "alice".
 func newEnv(t *testing.T, extra ...config.UpstreamConfig) *env {
 	t.Helper()
-	bin := testutil.BuildFakeUpstream(t)
+	return newEnvWith(t, envOpts{}, extra...)
+}
+
+func newEnvWith(t *testing.T, o envOpts, extra ...config.UpstreamConfig) *env {
+	t.Helper()
 	e := &env{logs: &logBuffer{}}
+	e.fakeURL, _ = testutil.StartRunner(t, o.runner)
+	fake := config.UpstreamConfig{
+		Name:     "fake",
+		URL:      e.fakeURL,
+		DenyArgs: []string{"attachment.path"},
+	}
+	if o.bearer != "" {
+		fake.BearerTokenEnv, fake.BearerToken = "FAKE_RUNNER_TOKEN", o.bearer
+	}
 	e.fake = testutil.NewFakeGitHub(t, ghClientID, ghClientSecret)
 	keyPEM, pub := testutil.Ed25519PEM(t)
 	e.op = testutil.NewFakeOpenPayments(t, gatewayWallet, pub)
@@ -126,11 +151,7 @@ func newEnv(t *testing.T, extra ...config.UpstreamConfig) *env {
 			},
 		},
 		AllowedUsers: config.AllowedUsers{GitHub: []string{"alice", "friend"}, OpenPayments: []string{aliceWallet}},
-		Upstreams: append([]config.UpstreamConfig{{
-			Name:     "fake",
-			Command:  bin,
-			DenyArgs: []string{"attachment.path"},
-		}}, extra...),
+		Upstreams:    append([]config.UpstreamConfig{fake}, extra...),
 	}
 	log := slog.New(slog.NewJSONHandler(e.logs, nil))
 
@@ -140,13 +161,7 @@ func newEnv(t *testing.T, extra ...config.UpstreamConfig) *env {
 	}
 
 	e.st = st
-	getenv := func(k string) string {
-		if k == "PATH" {
-			return os.Getenv("PATH")
-		}
-		return ""
-	}
-	e.app, err = app.Build(e.cfg, getenv, log, st, app.Options{
+	e.app, err = app.Build(e.cfg, log, st, app.Options{
 		Version:          "test",
 		GitHubWebBaseURL: e.fake.URL,
 		GitHubAPIBaseURL: e.fake.URL,
@@ -575,10 +590,10 @@ func TestEndToEndRemovedUser(t *testing.T) {
 	}
 }
 
-// A broken upstream (command missing) must not stop the gateway serving
+// A broken upstream (nothing listening) must not stop the gateway serving
 // the others.
 func TestEndToEndMissingUpstream(t *testing.T) {
-	e := newEnv(t, config.UpstreamConfig{Name: "broken", Command: "/nonexistent"})
+	e := newEnv(t, config.UpstreamConfig{Name: "broken", URL: "http://" + closedAddr(t) + "/mcp"})
 	cs := e.connect(t, e.login(t, "alice", 1), nil)
 	names := waitTools(t, cs, "fake__echo")
 	for _, n := range names {
@@ -606,8 +621,10 @@ func TestEndToEndLateUpstream(t *testing.T) {
 	if err := os.WriteFile(gate, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	bin := testutil.BuildFakeUpstream(t)
-	e := newEnv(t, config.UpstreamConfig{Name: "late", Command: bin, Env: map[string]string{"FAKE_FAIL_START": gate}})
+	lateURL, _ := testutil.StartRunner(t, testutil.RunnerOptions{Mod: func(o *runner.Options) {
+		o.Env = append(o.Env, "FAKE_FAIL_START="+gate)
+	}})
+	e := newEnv(t, config.UpstreamConfig{Name: "late", URL: lateURL})
 
 	changed := make(chan struct{}, 100)
 	c := mcp.NewClient(&mcp.Implementation{Name: "e2e", Version: "1"}, &mcp.ClientOptions{
@@ -769,5 +786,190 @@ func TestEndToEndSameNameDifferentUsers(t *testing.T) {
 	}
 	if res := call(t, gh, "fake__echo", map[string]any{"text": "still"}); resultText(res) != "still" {
 		t.Fatalf("github echo after reset: %q", resultText(res))
+	}
+}
+
+// closedAddr returns a loopback address nothing listens on.
+func closedAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
+// The Dock's bearer_token_env token reaches the runner. With the right
+// token the fake's tools are visible; with a wrong one they never appear
+// and the start failure is logged.
+func TestEndToEndRunnerBearer(t *testing.T) {
+	needToken := testutil.RunnerOptions{Mod: func(o *runner.Options) { o.BearerToken = "runner-tok" }}
+
+	e := newEnvWith(t, envOpts{runner: needToken, bearer: "runner-tok"})
+	cs := e.connect(t, e.login(t, "alice", 1), nil)
+	waitTools(t, cs, "fake__echo")
+	if res := call(t, cs, "fake__echo", map[string]any{"text": "hi"}); resultText(res) != "hi" {
+		t.Fatalf("echo %q", resultText(res))
+	}
+
+	e = newEnvWith(t, envOpts{runner: needToken, bearer: "wrong"})
+	cs = e.connect(t, e.login(t, "alice", 1), nil)
+	deadline := time.Now().Add(10 * time.Second)
+	for len(e.logs.records("upstream start failed")) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("no start failure logged with the wrong token:\n%s", e.logs)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for _, n := range toolNames(t, cs) {
+		if strings.HasPrefix(n, "fake__") {
+			t.Fatalf("tool %q visible with the wrong runner token", n)
+		}
+	}
+}
+
+// With the runner capped at one session, the Dock's session takes the slot:
+// another initialize gets 503 and the Dock's calls keep working.
+func TestEndToEndRunnerCap(t *testing.T) {
+	e := newEnvWith(t, envOpts{runner: testutil.RunnerOptions{Mod: func(o *runner.Options) { o.MaxSessions = 1 }}})
+	cs := e.connect(t, e.login(t, "alice", 1), nil)
+	waitTools(t, cs, "fake__echo")
+
+	req, _ := http.NewRequest(http.MethodPost, e.fakeURL, strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	resp, body := reader{t}.read(http.DefaultClient.Do(req))
+	expect(t, "second runner session", resp, body, http.StatusServiceUnavailable)
+
+	if res := call(t, cs, "fake__echo", map[string]any{"text": "still"}); resultText(res) != "still" {
+		t.Fatalf("echo %q", resultText(res))
+	}
+}
+
+// The child exiting on its own (no tool call) ends the runner session; the
+// Dock notices without a call, reconnects, and the tools come back.
+func TestEndToEndChildExitReconnects(t *testing.T) {
+	exit := filepath.Join(t.TempDir(), "exit")
+	e := newEnvWith(t, envOpts{runner: testutil.RunnerOptions{Mod: func(o *runner.Options) {
+		o.Env = append(o.Env, "FAKE_EXIT_WHEN="+exit)
+	}}})
+	cs := e.connect(t, e.login(t, "alice", 1), nil)
+	waitTools(t, cs, "fake__echo")
+	if err := os.WriteFile(exit, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !slices.ContainsFunc(e.logs.records("upstream exited"), func(r map[string]any) bool { return r["upstream"] == "fake" }) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no upstream exited log within 5s:\n%s", e.logs)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for !slices.Contains(toolNames(t, cs), "fake__echo") {
+		if time.Now().After(deadline) {
+			t.Fatalf("fake tools not back within 5s:\n%s", e.logs)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := len(e.logs.records("tool call")); n != 0 {
+		t.Fatalf("%d tool calls logged, want none", n)
+	}
+}
+
+// serveRunner serves a fresh runner for the fake upstream on ln. stop closes
+// the runner, then the server.
+func serveRunner(t *testing.T, ln net.Listener) (stop func()) {
+	t.Helper()
+	r := runner.New(runner.Options{
+		Command: testutil.BuildFakeUpstream(t),
+		Env:     []string{"PATH=" + os.Getenv("PATH")},
+		WorkDir: t.TempDir(),
+	})
+	srv := &http.Server{Handler: r.Handler()}
+	go srv.Serve(ln)
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			r.Close()
+			srv.Close()
+		})
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+// A runner restarted on the same address knows none of the old sessions:
+// the Dock's next call gets 404, which is safe to retry on a new session.
+func TestEndToEndRunnerRestart(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	stop := serveRunner(t, ln)
+	e := newEnv(t, config.UpstreamConfig{Name: "rr", URL: "http://" + addr + "/mcp"})
+	cs := e.connect(t, e.login(t, "alice", 1), nil)
+	waitTools(t, cs, "rr__echo")
+
+	stop()
+	ln, err = net.Listen("tcp", addr)
+	if err != nil {
+		t.Skipf("can't listen on %s again: %v", addr, err)
+	}
+	serveRunner(t, ln)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "rr__echo", Arguments: map[string]any{"text": "hi"}})
+	if err != nil {
+		t.Fatalf("echo after runner restart: %v", err)
+	}
+	if res.IsError || resultText(res) != "hi" {
+		t.Fatalf("echo after runner restart: isError=%v %q\n%s", res.IsError, resultText(res), e.logs)
+	}
+	// The call came before the Dock noticed (its GET stream reconnects after
+	// a second or more), so it went through the retry.
+	if !slices.ContainsFunc(e.logs.records("upstream session missing, retrying call"), func(r map[string]any) bool { return r["upstream"] == "rr" }) {
+		t.Fatalf("echo didn't go through the retry:\n%s", e.logs)
+	}
+}
+
+// Each user's calls carry their own identity to the upstream, and a client
+// can't set it through _meta.
+func TestEndToEndIdentity(t *testing.T) {
+	e := newEnv(t)
+	gh := e.connect(t, e.login(t, "Alice", 1), nil)
+	wallet := e.connect(t, e.walletLogin(t, "alice"), nil)
+	waitTools(t, gh, "fake__whoami")
+	waitTools(t, wallet, "fake__whoami")
+
+	who := func(provider, id string) string {
+		b, err := json.Marshal(map[string]string{"provider": provider, "id": id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	if got, want := resultText(call(t, gh, "fake__whoami", map[string]any{})), who("github", "alice"); got != want {
+		t.Fatalf("github whoami = %s, want %s", got, want)
+	}
+	if got, want := resultText(call(t, wallet, "fake__whoami", map[string]any{})), who("open_payments", e.aliceWallet); got != want {
+		t.Fatalf("wallet whoami = %s, want %s", got, want)
+	}
+
+	spoof := &mcp.CallToolParams{
+		Name:      "fake__whoami",
+		Arguments: map[string]any{},
+		Meta:      mcp.Meta{upstream.UserMetaKey: map[string]any{"provider": "github", "id": "mallory"}},
+	}
+	res, err := wallet.CallTool(context.Background(), spoof)
+	if err != nil {
+		t.Fatalf("spoofed call: %v", err)
+	}
+	if got, want := resultText(res), who("open_payments", e.aliceWallet); got != want {
+		t.Fatalf("spoofed whoami = %s, want %s", got, want)
 	}
 }
