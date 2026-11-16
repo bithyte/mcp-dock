@@ -33,7 +33,20 @@ type Config struct {
 
 type ProvidersConfig struct {
 	GitHub       *GitHubConfig       `yaml:"github"`
-	OpenPayments *OpenPaymentsConfig `yaml:"open_payments"`
+	OpenPayments *OpenPaymentsConfig `yaml:"open_payments"` // removed with the built-in Open Payments login
+	OIDC         []OIDCConfig        `yaml:"oidc"`
+}
+
+// OIDCConfig is one OpenID Connect provider.
+type OIDCConfig struct {
+	Name            string   `yaml:"name"`
+	Label           string   `yaml:"label"`  // defaulted to Name
+	Issuer          string   `yaml:"issuer"` // verbatim, no slash trimming
+	ClientID        string   `yaml:"client_id"`
+	ClientSecretEnv string   `yaml:"client_secret_env"`
+	Scopes          []string `yaml:"scopes"`     // defaulted; openid always first
+	UserClaim       string   `yaml:"user_claim"` // defaulted to "sub"
+	ClientSecret    string   `yaml:"-"`
 }
 
 type OpenPaymentsConfig struct {
@@ -47,8 +60,9 @@ type OpenPaymentsConfig struct {
 
 // AllowedUsers lists who may log in, per provider.
 type AllowedUsers struct {
-	GitHub       []string `yaml:"github"`
-	OpenPayments []string `yaml:"open_payments"` // normalized at load
+	GitHub       []string            `yaml:"github"`
+	OpenPayments []string            `yaml:"open_payments"` // normalized at load; removed with the built-in Open Payments login
+	OIDC         map[string][]string `yaml:"oidc"`          // provider name -> entries
 }
 
 type GitHubConfig struct {
@@ -200,8 +214,8 @@ func rejectOldShape(data []byte) error {
 
 func (c *Config) validateProviders(getenv func(string) string) error {
 	gh, op := c.Providers.GitHub, c.Providers.OpenPayments
-	if gh == nil && op == nil {
-		return errors.New("providers: configure at least one of providers.github or providers.open_payments")
+	if gh == nil && op == nil && len(c.Providers.OIDC) == 0 {
+		return errors.New("providers: configure at least one of providers.github, providers.oidc or providers.open_payments")
 	}
 	if gh != nil {
 		if gh.ClientID == "" {
@@ -243,6 +257,102 @@ func (c *Config) validateProviders(getenv func(string) string) error {
 			return fmt.Errorf("allowed_users.open_payments[%d]: %w", i, err)
 		}
 		c.AllowedUsers.OpenPayments[i] = n
+	}
+	return c.validateOIDC(getenv)
+}
+
+// validateOIDC checks providers.oidc, fills defaults, resolves secrets and
+// normalizes allowed_users.oidc.
+func (c *Config) validateOIDC(getenv func(string) string) error {
+	names := map[string]bool{}
+	issuers := map[string]bool{}
+	for i := range c.Providers.OIDC {
+		o := &c.Providers.OIDC[i]
+		p := fmt.Sprintf("providers.oidc[%d]", i)
+		if !nameRe.MatchString(o.Name) || o.Name == string(identity.GitHub) {
+			return fmt.Errorf("%s.name %q invalid: use lowercase letters, digits, single _ or -, and not %q", p, o.Name, identity.GitHub)
+		}
+		if names[o.Name] {
+			return fmt.Errorf("%s.name %q is a duplicate", p, o.Name)
+		}
+		names[o.Name] = true
+		if err := checkIssuer(o.Issuer); err != nil {
+			return fmt.Errorf("%s.issuer: %w", p, err)
+		}
+		key := strings.TrimRight(o.Issuer, "/")
+		if issuers[key] {
+			return fmt.Errorf("%s.issuer %q duplicates another provider's issuer", p, o.Issuer)
+		}
+		issuers[key] = true
+		if o.ClientID == "" {
+			return fmt.Errorf("%s.client_id is required", p)
+		}
+		if o.ClientSecretEnv == "" {
+			return fmt.Errorf("%s.client_secret_env is required", p)
+		}
+		o.ClientSecret = getenv(o.ClientSecretEnv)
+		if o.ClientSecret == "" {
+			return fmt.Errorf("%s.client_secret_env: env var %s is empty or unset", p, o.ClientSecretEnv)
+		}
+		if o.Label == "" {
+			o.Label = o.Name
+		}
+		if o.UserClaim == "" {
+			o.UserClaim = "sub"
+		}
+		scopes := []string{"openid"}
+		for _, s := range o.Scopes {
+			if s != "openid" {
+				scopes = append(scopes, s)
+			}
+		}
+		o.Scopes = scopes
+	}
+	for name, entries := range c.AllowedUsers.OIDC {
+		o := c.OIDCProvider(name)
+		if o == nil {
+			return fmt.Errorf("allowed_users.oidc.%s: no provider named %q in providers.oidc", name, name)
+		}
+		for i, e := range entries {
+			e = strings.TrimSpace(e)
+			if e == "" {
+				return fmt.Errorf("allowed_users.oidc.%s[%d] is empty", name, i)
+			}
+			if o.UserClaim == "email" {
+				e = strings.ToLower(e)
+			}
+			entries[i] = e
+		}
+	}
+	return nil
+}
+
+// checkIssuer checks s is an absolute URL with a host and no userinfo, query
+// or fragment. It must be https, except for loopback hosts.
+func checkIssuer(s string) error {
+	if s == "" {
+		return errors.New("is required")
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" || u.Opaque != "" {
+		return fmt.Errorf("must be an absolute https URL, got %q", s)
+	}
+	if u.User != nil {
+		return errors.New("must not contain userinfo")
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(s, "?#") {
+		return fmt.Errorf("must not have a query or fragment, got %q", s)
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		switch u.Hostname() {
+		case "localhost", "127.0.0.1", "::1":
+		default:
+			return fmt.Errorf("must use https (http is only allowed for localhost, 127.0.0.1 and ::1), got %q", s)
+		}
+	default:
+		return fmt.Errorf("must be an absolute https URL, got %q", s)
 	}
 	return nil
 }
@@ -317,8 +427,74 @@ func (c *Config) IsAllowed(userID string) bool {
 				return true
 			}
 		}
+	default:
+		prov, isOIDC := p.OIDCName()
+		if !isOIDC || c.OIDCProvider(prov) == nil {
+			return false
+		}
+		for _, u := range c.AllowedUsers.OIDC[prov] {
+			if u == name {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+// OIDCProvider returns the configured OIDC provider with the given name, or
+// nil.
+func (c *Config) OIDCProvider(name string) *OIDCConfig {
+	for i := range c.Providers.OIDC {
+		if c.Providers.OIDC[i].Name == name {
+			return &c.Providers.OIDC[i]
+		}
+	}
+	return nil
+}
+
+// ProviderLabel is the display name of a provider. Unknown providers are
+// returned as their id.
+func (c *Config) ProviderLabel(p identity.Provider) string {
+	if name, ok := p.OIDCName(); ok {
+		if o := c.OIDCProvider(name); o != nil {
+			return o.Label
+		}
+		return string(p)
+	}
+	return identity.Label(p)
+}
+
+// DescribeUser is a human readable description of a user id. Unknown ids are
+// returned unchanged.
+func (c *Config) DescribeUser(id string) string {
+	p, value, ok := identity.Split(id)
+	if !ok {
+		return id
+	}
+	if name, isOIDC := p.OIDCName(); isOIDC {
+		if o := c.OIDCProvider(name); o != nil {
+			return o.Label + " user " + value
+		}
+		return id
+	}
+	return identity.Describe(id)
+}
+
+// CanonicalUser lowercases the value of an OIDC user id whose provider uses
+// the email claim. Other ids are returned unchanged.
+func (c *Config) CanonicalUser(id string) string {
+	p, value, ok := identity.Split(id)
+	if !ok {
+		return id
+	}
+	name, isOIDC := p.OIDCName()
+	if !isOIDC {
+		return id
+	}
+	if o := c.OIDCProvider(name); o != nil && o.UserClaim == "email" {
+		return identity.OIDCUser(name, strings.ToLower(value))
+	}
+	return id
 }
 
 // ResourceURL is the MCP endpoint, also the OAuth resource.
