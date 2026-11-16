@@ -190,7 +190,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.signin(w, http.StatusOK, client.Name, ar.ID)
+	s.signin(w, client.Name, ar.ID)
 }
 
 // providerCount is the number of configured login providers.
@@ -320,7 +320,7 @@ func (s *Server) afterLogin(w http.ResponseWriter, r *http.Request, ar *store.Au
 }
 
 // handleConsent takes the Approve/Deny POST. The AuthRequest must exist,
-// be past GitHub login, and equal this browser's cookie; anything else is an
+// be past provider login, and equal this browser's cookie; anything else is an
 // error page and never a code.
 //
 // CSRF: the cookie is SameSite=Lax, so browsers don't send it on a

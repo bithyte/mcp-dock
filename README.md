@@ -279,6 +279,7 @@ Things to know:
 
 - `issuer` must match the IdP's own issuer exactly, byte for byte, as in its `/.well-known/openid-configuration`. That includes a trailing slash if the IdP has one (Auth0 does). It's used as written. `http` is only accepted for `localhost`, `127.0.0.1` and `::1`.
 - `user_claim` picks which ID token claim is the user's identity. Default `sub`, which is stable per issuer. `email` works too, but the ID token must also carry `email_verified: true` or the login is denied; request the `email` scope for it. The claim has to be in the ID token itself; the userinfo endpoint isn't read. If the claim is missing or isn't a non-empty string, login is denied.
+- Use a `user_claim` that is immutable and unique per issuer. Claims like `preferred_username` or `upn` can be reassigned at some IdPs, and then a new holder of the name would log in as the old user.
 - Multi-tenant Entra (the `common` and `organizations` endpoints) isn't supported: their issuer is templated, so it can't match the strict issuer check. Single-tenant Entra works.
 - The IdP isn't contacted at startup. The first login through a provider fetches its discovery document and keys, and a success is cached for the life of the process. A failure isn't cached, the user sees "Couldn't reach <label>. Try again.", and the next attempt retries.
 
@@ -391,7 +392,7 @@ These steps haven't been checked against jaypost's own docs. The owner should co
 
 If a login is already bound to one GitHub numeric ID and someone with a different ID signs in as it, the gateway denies and logs a warning. `users reset` clears that user's stored GitHub ID, consents, and tokens so it can re-bind. It operates directly on the SQLite DB.
 
-The argument is a GitHub login (`alice` or `github:alice`) or an OIDC user (`oidc:wallet:https://ilp.interledger-test.dev/alice`; everything after the second colon is the claim value). For an OIDC user it clears consents and tokens; there's no stored ID to clear. The `$host/path` and `https://...` wallet shortcuts are gone, so `users reset '$example.com/alice'` is an error. It only resets that one user; users of the same name at other providers are unaffected.
+The argument is a GitHub login (`alice` or `github:alice`) or an OIDC user (`oidc:wallet:https://ilp.interledger-test.dev/alice`; everything after the second colon is the claim value). For an OIDC user it clears consents and tokens; there's no stored ID to clear. For a provider with `user_claim: email` the value is lowercased before reset, so `oidc:corp:Alice@Example.com` resets `alice@example.com`. The `$host/path` and `https://...` wallet shortcuts are gone, so `users reset '$example.com/alice'` is an error. It only resets that one user; users of the same name at other providers are unaffected.
 
 ## Known limits
 

@@ -51,6 +51,7 @@ type FakeOIDC struct {
 	algNone     bool
 	discoveries int
 	lastAuth    url.Values
+	lastAccess  string
 	codes       map[string]*fakeOIDCCode
 }
 
@@ -154,6 +155,13 @@ func (f *FakeOIDC) Discoveries() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.discoveries
+}
+
+// LastAccessToken returns the access token in the most recent token response.
+func (f *FakeOIDC) LastAccessToken() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastAccess
 }
 
 // LastAuthorize returns the query of the most recent /authorize request.
@@ -289,8 +297,10 @@ func (f *FakeOIDC) token(w http.ResponseWriter, r *http.Request, good, other *rs
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 		return
 	}
+	access := "at_" + randHex()
+	f.set(func() { f.lastAccess = access })
 	writeJSON(w, http.StatusOK, map[string]any{
-		"access_token": "at_" + randHex(),
+		"access_token": access,
 		"token_type":   "Bearer",
 		"expires_in":   300,
 		"id_token":     idToken,

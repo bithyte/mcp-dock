@@ -91,6 +91,7 @@ func Build(cfg *config.Config, log *slog.Logger, st *store.Store, opts Options) 
 			Scopes:       p.Scopes,
 			UserClaim:    p.UserClaim,
 			HTTP:         opts.OIDCHTTP,
+			Now:          opts.Now,
 		}))
 	}
 	a.OAuth = oauth.New(oauth.Options{

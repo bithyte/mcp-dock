@@ -265,3 +265,23 @@ func TestIdPCodeRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestBadClientSecretNamesErrorCode(t *testing.T) {
+	f := newFake(t, testutil.FakeOIDCOptions{})
+	c := newClient(f, func(c *oidclogin.Config) { c.ClientSecret = "not-the-secret" })
+	ctx := context.Background()
+	_, p, err := c.Start(ctx, redirectURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Finish(ctx, p, "made-up-code-12345", redirectURI)
+	if !errors.Is(err, oidclogin.ErrUnavailable) {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(err.Error(), "status 401: invalid_client") {
+		t.Errorf("error lacks status and OAuth error code: %v", err)
+	}
+	if strings.Contains(err.Error(), "not-the-secret") {
+		t.Errorf("error leaks the secret: %v", err)
+	}
+}

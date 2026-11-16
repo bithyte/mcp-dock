@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -172,14 +173,18 @@ func (c *Client) Finish(ctx context.Context, p Pending, code, redirectURI string
 	return v, nil
 }
 
-// exchangeError maps a code exchange failure to ErrUnavailable without the
-// token endpoint's response body.
+// exchangeError maps a code exchange failure to ErrUnavailable. It keeps the
+// status and the OAuth error code (a public RFC 6749 value such as
+// invalid_client), never the token endpoint's response body.
 func exchangeError(err error) error {
 	var re *oauth2.RetrieveError
 	if errors.As(err, &re) {
 		status := 0
 		if re.Response != nil {
 			status = re.Response.StatusCode
+		}
+		if re.ErrorCode != "" {
+			return fmt.Errorf("%w: token endpoint status %d: %s", ErrUnavailable, status, clip(re.ErrorCode))
 		}
 		return fmt.Errorf("%w: token endpoint status %d", ErrUnavailable, status)
 	}
@@ -202,8 +207,12 @@ func random() string {
 // a misbehaving IdP can't flood the logs.
 func clip(s string) string {
 	const max = 200
-	if len(s) > max {
-		return s[:max] + "..."
+	if len(s) <= max {
+		return s
 	}
-	return s
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }

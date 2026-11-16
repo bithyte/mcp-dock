@@ -21,17 +21,12 @@ func (s *Server) oidcLabel(c *oidclogin.Client) string {
 	return s.cfg.ProviderLabel(identity.OIDCProvider(c.Name()))
 }
 
-// oidcReason is what gets logged for an oidclogin error: the sentinel only.
-// The wrapped text can quote go-oidc output (iss and aud values, discovery
-// bodies), which has no place in the log.
-func oidcReason(err error) string {
-	for _, e := range []error{oidclogin.ErrUnavailable, oidclogin.ErrInvalidToken, oidclogin.ErrClaim} {
-		if errors.Is(err, e) {
-			return e.Error()
-		}
-	}
-	return "oidc login error"
-}
+// oidcReason is what gets logged for an oidclogin error: its full text.
+// oidclogin builds that text so it's safe to log: library output is clipped,
+// and token endpoint response bodies are never included. It's what tells an
+// operator about an issuer mismatch, a wrong client_id or a bad secret. It
+// never goes on a page.
+func oidcReason(err error) string { return err.Error() }
 
 // handleOIDCStart is the sign-in page's button for one OIDC provider.
 func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request, c *oidclogin.Client) {
@@ -131,6 +126,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request, c *o
 	}
 	code := q.Get("code")
 	if code == "" {
+		s.log.Warn("oidc callback without a code", "provider", name)
 		s.abandon(w, r, ar)
 		s.badLink(w)
 		return

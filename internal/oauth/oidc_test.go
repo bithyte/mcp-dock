@@ -240,6 +240,25 @@ func TestOIDCStateMismatch(t *testing.T) {
 	authRequestGone(t, srv, reqID)
 }
 
+func TestOIDCCallbackWithoutCode(t *testing.T) {
+	srv, ts, fakes, logs := newTestServerOIDC(t, walletOnly())
+	fake := fakes["wallet"]
+	fake.SetSub(aliceSub)
+	id := registerClient(t, ts, claudeRedirect)
+	c := newBrowser(t)
+	cb, _ := url.Parse(oidcCallbackURL(t, c, ts, fake, "wallet", id))
+	reqID := jarAuthCookie(c, ts).Value
+	q := cb.Query()
+	q.Del("code")
+	cb.RawQuery = q.Encode()
+	resp, _ := get(t, c, cb.String())
+	checkHTMLError(t, resp, http.StatusBadRequest)
+	if !strings.Contains(logs.String(), "oidc callback without a code") {
+		t.Errorf("no log line for the missing code: %s", logs.String())
+	}
+	authRequestGone(t, srv, reqID)
+}
+
 func TestOIDCResubmit(t *testing.T) {
 	_, ts, fakes, _ := newTestServerOIDC(t, oidcTestOpts{
 		GitHub:    true,
@@ -381,8 +400,12 @@ func TestOIDCInvalidToken(t *testing.T) {
 		!strings.Contains(body, "Couldn&#39;t complete the Open Payments wallet login. Try again.") {
 		t.Fatalf("body: %s", body)
 	}
-	if strings.Contains(body, "other") || strings.Contains(logs.String(), `"other"`) {
-		t.Errorf("verify error text leaked: %s / %s", body, logs.String())
+	if strings.Contains(body, "other") {
+		t.Errorf("verify error text leaked into the page: %s", body)
+	}
+	// The log carries the library's reason so a wrong client_id is diagnosable.
+	if out := logs.String(); !strings.Contains(out, "oidc id token invalid") || !strings.Contains(out, "expected audience") {
+		t.Errorf("log lacks the verify failure detail: %s", out)
 	}
 	authRequestGone(t, srv, reqID)
 }
@@ -408,7 +431,7 @@ func TestOIDCClaimMissing(t *testing.T) {
 }
 
 func TestOIDCIdPDownAtStart(t *testing.T) {
-	srv, ts, fakes, _ := newTestServerOIDC(t, oidcTestOpts{
+	srv, ts, fakes, logs := newTestServerOIDC(t, oidcTestOpts{
 		GitHub:    true,
 		Providers: []config.OIDCConfig{walletProvider},
 		Allowed:   map[string][]string{"wallet": {aliceSub}},
@@ -423,6 +446,12 @@ func TestOIDCIdPDownAtStart(t *testing.T) {
 	checkHTMLError(t, resp, http.StatusBadGateway)
 	if !strings.Contains(body, "Couldn&#39;t reach Open Payments wallet") {
 		t.Fatalf("body: %s", body)
+	}
+	if strings.Contains(body, "discovery") {
+		t.Errorf("error detail on the page: %s", body)
+	}
+	if out := logs.String(); !strings.Contains(out, "oidc provider unavailable: discovery") {
+		t.Errorf("log lacks the discovery failure detail: %s", out)
 	}
 	if _, err := srv.store.GetAuthRequest(context.Background(), reqID); err != nil {
 		t.Fatalf("auth request dropped: %v", err)
@@ -476,6 +505,7 @@ func TestOIDCNoSecretsLogged(t *testing.T) {
 		"request id":    reqID,
 		"code":          code,
 		"pending blob":  raw,
+		"access token":  fake.LastAccessToken(),
 	}
 	if la := fake.LastAuthorize(); la.Get("state") != pl.OIDC.State || la.Get("nonce") != pl.OIDC.Nonce {
 		t.Fatal("captured pending state doesn't match the authorize request")

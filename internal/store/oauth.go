@@ -86,8 +86,9 @@ func (s *Store) SetAuthRequestUser(ctx context.Context, id, userID string, githu
 	return nil
 }
 
-// SetAuthRequestPending stores an opaque provider blob (it may hold a
-// continue token, so callers must never log it) on an unexpired auth request
+// SetAuthRequestPending stores an opaque provider blob (the provider's login
+// state: the GitHub state, or an OIDC state, nonce and PKCE verifier, so
+// callers must never log it) on an unexpired auth request
 // that has no login yet at now, replacing any earlier blob. ErrNotFound if no row
 // matched.
 func (s *Store) SetAuthRequestPending(ctx context.Context, id, pending string, now time.Time) error {

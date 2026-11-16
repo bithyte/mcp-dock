@@ -17,7 +17,7 @@ type pendingLogin struct {
 }
 
 // signin renders the sign-in page for the auth request id.
-func (s *Server) signin(w http.ResponseWriter, status int, clientName, id string) {
+func (s *Server) signin(w http.ResponseWriter, clientName, id string) {
 	if clientName == "" {
 		clientName = "Unnamed app"
 	}
@@ -28,7 +28,7 @@ func (s *Server) signin(w http.ResponseWriter, status int, clientName, id string
 	for _, c := range s.oidc {
 		buttons = append(buttons, signinButton{Action: oidcStartPath(c.Name()), Label: "Continue with " + s.oidcLabel(c)})
 	}
-	s.writeHTML(w, status, signinTmpl, signinData{
+	s.writeHTML(w, http.StatusOK, signinTmpl, signinData{
 		ClientName: clientName,
 		RequestID:  id,
 		Buttons:    buttons,
