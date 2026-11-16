@@ -110,7 +110,7 @@ func TestSigninShowsOIDCButtons(t *testing.T) {
 		t.Errorf("%d forms carry the request field, want 3: %s", n, body)
 	}
 	if strings.Contains(body, `name="wallet"`) {
-		t.Errorf("wallet field shown without open payments: %s", body)
+		t.Errorf("built-in wallet field shown: %s", body)
 	}
 }
 

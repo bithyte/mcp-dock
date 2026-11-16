@@ -91,10 +91,10 @@ func NewFakeOIDC(t testing.TB, clientID, clientSecret string, o FakeOIDCOptions)
 	mux.HandleFunc("GET /authorize", f.authorize)
 	mux.HandleFunc("POST /token", func(w http.ResponseWriter, r *http.Request) { f.token(w, r, good, other) })
 	mux.HandleFunc("GET /jwks", func(w http.ResponseWriter, r *http.Request) {
-		oidcJSON(w, http.StatusOK, map[string]any{"keys": []any{map[string]any{
+		writeJSON(w, http.StatusOK, map[string]any{"keys": []any{map[string]any{
 			"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "k1",
-			"n": oidcB64(good.N.Bytes()),
-			"e": oidcB64(big.NewInt(int64(good.E)).Bytes()),
+			"n": b64url(good.N.Bytes()),
+			"e": b64url(big.NewInt(int64(good.E)).Bytes()),
 		}}})
 	})
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -174,7 +174,7 @@ func (f *FakeOIDC) set(fn func()) {
 }
 
 func (f *FakeOIDC) discovery(w http.ResponseWriter, r *http.Request) {
-	oidcJSON(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"issuer":                                f.Issuer(),
 		"authorization_endpoint":                f.URL + "/authorize",
 		"token_endpoint":                        f.URL + "/token",
@@ -243,11 +243,11 @@ func (f *FakeOIDC) token(w http.ResponseWriter, r *http.Request, good, other *rs
 	}
 	if !ok || id != f.clientID || subtle.ConstantTimeCompare([]byte(secret), []byte(f.clientSecret)) != 1 {
 		w.Header().Set("WWW-Authenticate", `Basic realm="fake"`)
-		oidcJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_client"})
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_client"})
 		return
 	}
 	if err := r.ParseForm(); err != nil || r.PostForm.Get("grant_type") != "authorization_code" {
-		oidcJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	f.mu.Lock()
@@ -256,12 +256,12 @@ func (f *FakeOIDC) token(w http.ResponseWriter, r *http.Request, good, other *rs
 	otherKey, algNone := f.otherKey, f.algNone
 	f.mu.Unlock()
 	if !found || c.redirectURI != r.PostForm.Get("redirect_uri") {
-		oidcJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 		return
 	}
 	sum := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
-	if oidcB64(sum[:]) != c.challenge {
-		oidcJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
+	if b64url(sum[:]) != c.challenge {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 		return
 	}
 	now := time.Now()
@@ -286,10 +286,10 @@ func (f *FakeOIDC) token(w http.ResponseWriter, r *http.Request, good, other *rs
 	}
 	idToken, err := signJWT(claims, key, kid, algNone)
 	if err != nil {
-		oidcJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 		return
 	}
-	oidcJSON(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"access_token": "at_" + randHex(),
 		"token_type":   "Bearer",
 		"expires_in":   300,
@@ -310,7 +310,7 @@ func signJWT(claims map[string]any, key *rsa.PrivateKey, kid string, algNone boo
 	if err != nil {
 		return "", err
 	}
-	signing := oidcB64(h) + "." + oidcB64(p)
+	signing := b64url(h) + "." + b64url(p)
 	if algNone {
 		return signing + ".", nil
 	}
@@ -319,12 +319,12 @@ func signJWT(claims map[string]any, key *rsa.PrivateKey, kid string, algNone boo
 	if err != nil {
 		return "", err
 	}
-	return signing + "." + oidcB64(sig), nil
+	return signing + "." + b64url(sig), nil
 }
 
-func oidcB64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+func b64url(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
-func oidcJSON(w http.ResponseWriter, status int, v any) {
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)

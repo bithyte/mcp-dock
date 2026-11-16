@@ -26,8 +26,6 @@ const (
 	consentPath     = "/oauth/consent"
 	callbackPath    = "/oauth/github/callback"
 	githubStartPath = "/oauth/github/start"
-	opStartPath     = "/oauth/open-payments/start"
-	opCallbackPath  = "/oauth/open-payments/callback"
 
 	maxStateLen = 2048
 	maxScopeLen = 1024
@@ -181,7 +179,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setAuthCookie(w, ar.ID, int(authRequestTTL/time.Second))
-	// One provider with nothing to type: skip the page and go straight to it.
+	// One provider: skip the page and go straight to it.
 	if s.providerCount() == 1 {
 		switch {
 		case s.gh != nil:
@@ -192,16 +190,13 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.signin(w, http.StatusOK, client.Name, ar.ID, "", "")
+	s.signin(w, http.StatusOK, client.Name, ar.ID)
 }
 
 // providerCount is the number of configured login providers.
 func (s *Server) providerCount() int {
 	n := len(s.oidc)
 	if s.gh != nil {
-		n++
-	}
-	if s.op != nil {
 		n++
 	}
 	return n

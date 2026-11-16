@@ -90,7 +90,7 @@ func TestUsersReset(t *testing.T) {
 	if err := st.SetGitHubID(context.Background(), "github:alice", 42); err != nil {
 		t.Fatal(err)
 	}
-	const wallet = "open_payments:https://w.example/Al"
+	const wallet = "oidc:wallet:https://w.example/Al"
 	if err := st.SaveConsent(context.Background(), wallet, "c", "https://a.example/cb"); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestUsersReset(t *testing.T) {
 	st.Close()
 
 	out.Reset()
-	if err := run(context.Background(), []string{"users", "reset", "-config", p, "$w.example/Al"}, testGetenv, &out); err != nil {
+	if err := run(context.Background(), []string{"users", "reset", "-config", p, wallet}, testGetenv, &out); err != nil {
 		t.Fatalf("run wallet: %v", err)
 	}
 	if !strings.Contains(out.String(), wallet) {
@@ -129,9 +129,11 @@ func TestUsersReset(t *testing.T) {
 		t.Error("wallet consent not cleared")
 	}
 
-	err = run(context.Background(), []string{"users", "reset", "-config", p, "http://x"}, testGetenv, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "usage") {
-		t.Errorf("http://x: err %v, want a usage error", err)
+	for _, arg := range []string{"http://x", "$w.example/Al", "https://w.example/Al"} {
+		err = run(context.Background(), []string{"users", "reset", "-config", p, arg}, testGetenv, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "usage") {
+			t.Errorf("%s: err %v, want a usage error", arg, err)
+		}
 	}
 }
 

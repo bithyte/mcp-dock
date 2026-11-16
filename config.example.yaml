@@ -7,18 +7,11 @@ providers:
   github:
     client_id: Ov23liXXXXXXXXXXXXXX
     client_secret_env: GITHUB_CLIENT_SECRET
-  open_payments:
-    wallet_address: https://ilp.interledger-test.dev/mcp
-    key_id: mcp-dock-key
-    # Env var holding an Ed25519 PKCS#8 private key, as PEM text or base64 of the PEM.
-    private_key_env: OP_PRIVATE_KEY
 
 allowed_users:
   github:
     - alice-github-login
     - friend-login
-  open_payments:
-    - $ilp.interledger-test.dev/alice
 
 upstreams:
   # Each upstream is a streamable HTTP MCP endpoint, usually an mcp-runner

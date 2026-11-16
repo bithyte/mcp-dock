@@ -1,13 +1,6 @@
 package config
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/base64"
-	"encoding/pem"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,8 +8,6 @@ import (
 	"testing"
 
 	"github.com/bithyte/mcp-dock/internal/identity"
-	"github.com/bithyte/mcp-dock/internal/oplogin"
-	"github.com/bithyte/mcp-dock/internal/testutil"
 )
 
 const validYAML = `
@@ -26,13 +17,8 @@ providers:
   github:
     client_id: Ov23liXXXXXXXXXXXXXX
     client_secret_env: GITHUB_CLIENT_SECRET
-  open_payments:
-    wallet_address: $ilp.interledger-test.dev/mcp
-    key_id: key-1
-    private_key_env: OP_PRIVATE_KEY
 allowed_users:
   github: [Alice]
-  open_payments: ["$ilp.interledger-test.dev/alice"]
 upstreams:
   - name: jaypost
     url: http://jaypost:8080/mcp
@@ -53,9 +39,7 @@ func write(t *testing.T, s string) string {
 	return p
 }
 
-var goodPEM, _ = testutil.Ed25519PEM(&testing.T{})
-
-var goodEnv = map[string]string{"GITHUB_CLIENT_SECRET": "s", "JAYPOST_RUNNER_TOKEN": "t", "OP_PRIVATE_KEY": goodPEM}
+var goodEnv = map[string]string{"GITHUB_CLIENT_SECRET": "s", "JAYPOST_RUNNER_TOKEN": "t", "WALLET_SECRET": "ws"}
 
 func TestLoadValid(t *testing.T) {
 	c, err := Load("../../config.example.yaml", env(goodEnv))
@@ -68,12 +52,6 @@ func TestLoadValid(t *testing.T) {
 	c, err = Load(write(t, validYAML), env(goodEnv))
 	if err != nil {
 		t.Fatal(err)
-	}
-	if c.AllowedUsers.OpenPayments[0] != "https://ilp.interledger-test.dev/alice" {
-		t.Fatalf("allowlist not normalized: %v", c.AllowedUsers.OpenPayments)
-	}
-	if c.Providers.OpenPayments.WalletAddress != "https://ilp.interledger-test.dev/mcp" || c.Providers.OpenPayments.PrivateKey != strings.TrimSpace(goodPEM) {
-		t.Fatalf("bad open_payments: %+v", c.Providers.OpenPayments)
 	}
 	if c.PublicURL != "https://mcp.example.com" {
 		t.Fatalf("PublicURL = %q", c.PublicURL)
@@ -119,19 +97,7 @@ func TestLoadRejects(t *testing.T) {
 		{"deny_args control", r("[attachment.path]", "[\"attachment.pa\\x01th\"]").Replace(validYAML), "deny_args", goodEnv},
 		{"deny_args dot only", r("[attachment.path]", "[\".\"]").Replace(validYAML), "deny_args", goodEnv},
 		{"no providers", noProviders, "providers.oidc", goodEnv},
-		{"wallet http", r("$ilp.interledger-test.dev/mcp", "http://ilp.example/mcp").Replace(validYAML), "wallet_address", goodEnv},
-		{"wallet empty", r("wallet_address: $ilp.interledger-test.dev/mcp", "wallet_address: \"\"").Replace(validYAML), "wallet_address", goodEnv},
-		{"key_id empty", r("key_id: key-1", "key_id: \"\"").Replace(validYAML), "key_id", goodEnv},
-		{"key env unset", validYAML, "private_key_env", map[string]string{"GITHUB_CLIENT_SECRET": "s", "JAYPOST_RUNNER_TOKEN": "t"}},
-		{"key env file path", validYAML, "private_key_env", withKey(keyFile(t))},
-		{"key env rsa", validYAML, "private_key_env", withKey(rsaPEM(t))},
-		{"key env ecdsa", validYAML, "private_key_env", withKey(ecPEM(t))},
-		{"key env garbage", validYAML, "private_key_env", withKey("!!!notbase64!!!")},
-		{"key env base64 non pem", validYAML, "private_key_env", withKey(base64.StdEncoding.EncodeToString([]byte("hello")))},
-		{"allowed op http", r("$ilp.interledger-test.dev/alice", "http://w.example/a").Replace(validYAML), "allowed_users.open_payments", goodEnv},
-		{"allowed github without provider", r("  github:\n    client_id: Ov23liXXXXXXXXXXXXXX\n    client_secret_env: GITHUB_CLIENT_SECRET\n", "").Replace(validYAML), "allowed_users.github", goodEnv},
-		{"allowed op without provider", opOnlyWithGitHubAllow, "allowed_users.github", goodEnv},
-		{"allowed op without op provider", githubOnlyWithOPAllow, "allowed_users.open_payments", goodEnv},
+		{"allowed github without provider", oidcOnlyWithGitHubAllow, "allowed_users.github", goodEnv},
 		{"unknown field", validYAML + "bogus: 1\n", "bogus", goodEnv},
 	}
 	for _, tc := range cases {
@@ -148,20 +114,14 @@ func TestLoadRejects(t *testing.T) {
 }
 
 func TestIsAllowed(t *testing.T) {
-	c := &Config{AllowedUsers: AllowedUsers{
-		GitHub:       []string{"Alice"},
-		OpenPayments: []string{"https://ilp.interledger-test.dev/alice"},
-	}}
-	for _, id := range []string{"github:alice", "github:ALICE", "open_payments:https://ilp.interledger-test.dev/alice"} {
+	c := &Config{AllowedUsers: AllowedUsers{GitHub: []string{"Alice"}}}
+	for _, id := range []string{"github:alice", "github:ALICE"} {
 		if !c.IsAllowed(id) {
 			t.Fatalf("expected %q allowed", id)
 		}
 	}
 	for _, id := range []string{
-		"github:other", "alice", "open_payments:alice",
-		"open_payments:https://ilp.interledger-test.dev/Alice",
-		"github:https://ilp.interledger-test.dev/alice",
-		"open_payments:Alice", "",
+		"github:other", "alice", "github:https://ilp.interledger-test.dev/alice", "",
 	} {
 		if c.IsAllowed(id) {
 			t.Fatalf("expected %q denied", id)
@@ -170,39 +130,9 @@ func TestIsAllowed(t *testing.T) {
 }
 
 func TestLoadProviderCombos(t *testing.T) {
-	for name, y := range map[string]string{"github only": githubOnly, "op only": opOnly} {
+	for name, y := range map[string]string{"github only": githubOnly, "oidc only": oidcOnly} {
 		if _, err := Load(write(t, y), env(goodEnv)); err != nil {
 			t.Fatalf("%s: %v", name, err)
-		}
-	}
-}
-
-func TestLoadAcceptsBase64Key(t *testing.T) {
-	e := withKey(base64.StdEncoding.EncodeToString([]byte(goodPEM)))
-	c, err := Load(write(t, validYAML), env(e))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Providers.OpenPayments.PrivateKey != strings.TrimSpace(goodPEM) {
-		t.Fatal("PrivateKey should be the decoded PEM")
-	}
-}
-
-func TestLoadNormalizesPaddedKey(t *testing.T) {
-	for name, v := range map[string]string{
-		"pem":    "  \n" + goodPEM + "\n  ",
-		"base64": "  " + base64.StdEncoding.EncodeToString([]byte(goodPEM)) + " \n",
-	} {
-		c, err := Load(write(t, validYAML), env(withKey(v)))
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		op := c.Providers.OpenPayments
-		if op.PrivateKey != strings.TrimSpace(goodPEM) {
-			t.Fatalf("%s: PrivateKey not normalized", name)
-		}
-		if _, err := oplogin.New(oplogin.Config{WalletAddress: op.WalletAddress, KeyID: op.KeyID, PrivateKey: op.PrivateKey}); err != nil {
-			t.Fatalf("%s: oplogin.New: %v", name, err)
 		}
 	}
 }
@@ -219,66 +149,29 @@ func TestOldConfigShape(t *testing.T) {
 			t.Fatalf("%s: error %v does not name %q", name, err, tc.want)
 		}
 	}
-}
-
-func TestKeyErrorsDoNotLeakValue(t *testing.T) {
-	secret := "SUPERSECRETVALUE123"
-	_, err := Load(write(t, validYAML), env(withKey(secret)))
-	if err == nil || strings.Contains(err.Error(), secret) {
-		t.Fatalf("err = %v", err)
+	const removed = "config: built-in Open Payments login was removed; run open-payments-oidc and add it under providers.oidc"
+	gh := "providers:\n  github:\n    client_id: x\n    client_secret_env: GITHUB_CLIENT_SECRET\n"
+	for name, y := range map[string]string{
+		"providers.open_payments":     old + "providers:\n  open_payments:\n    wallet_address: https://ilp.example/mcp\n    key_id: k\n    private_key_env: OP_PRIVATE_KEY\n",
+		"allowed_users.open_payments": old + gh + "allowed_users:\n  github: [a]\n  open_payments: [\"$ilp.example/a\"]\n",
+	} {
+		_, err := Load(write(t, y), env(goodEnv))
+		if err == nil || err.Error() != removed {
+			t.Fatalf("%s: error %v, want %q", name, err, removed)
+		}
 	}
 }
 
 const head = "public_url: https://mcp.example.com\ndata_dir: /d\n"
 const ghBlock = "  github:\n    client_id: x\n    client_secret_env: GITHUB_CLIENT_SECRET\n"
-const opBlock = "  open_payments:\n    wallet_address: https://ilp.example/mcp\n    key_id: k\n    private_key_env: OP_PRIVATE_KEY\n"
+const oidcBlock = "  oidc:\n    - name: wallet\n      issuer: https://idp.example.com\n      client_id: wid\n      client_secret_env: WALLET_SECRET\n"
 
 var (
-	noProviders           = head + "allowed_users:\n  github: [a]\n"
-	githubOnly            = head + "providers:\n" + ghBlock + "allowed_users:\n  github: [a]\n"
-	opOnly                = head + "providers:\n" + opBlock + "allowed_users:\n  open_payments: [\"$ilp.example/a\"]\n"
-	opOnlyWithGitHubAllow = head + "providers:\n" + opBlock + "allowed_users:\n  github: [a]\n"
-	githubOnlyWithOPAllow = head + "providers:\n" + ghBlock + "allowed_users:\n  open_payments: [\"$ilp.example/a\"]\n"
+	noProviders             = head + "allowed_users:\n  github: [a]\n"
+	githubOnly              = head + "providers:\n" + ghBlock + "allowed_users:\n  github: [a]\n"
+	oidcOnly                = head + "providers:\n" + oidcBlock + "allowed_users:\n  oidc:\n    wallet: [a]\n"
+	oidcOnlyWithGitHubAllow = head + "providers:\n" + oidcBlock + "allowed_users:\n  github: [a]\n"
 )
-
-func withKey(v string) map[string]string {
-	return map[string]string{"GITHUB_CLIENT_SECRET": "s", "JAYPOST_RUNNER_TOKEN": "t", "OP_PRIVATE_KEY": v}
-}
-
-func keyFile(t *testing.T) string {
-	t.Helper()
-	p := filepath.Join(t.TempDir(), "key.pem")
-	if err := os.WriteFile(p, []byte(goodPEM), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return p
-}
-
-func rsaPEM(t *testing.T) string {
-	t.Helper()
-	k, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	der, err := x509.MarshalPKCS8PrivateKey(k)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
-}
-
-func ecPEM(t *testing.T) string {
-	t.Helper()
-	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	der, err := x509.MarshalPKCS8PrivateKey(k)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
-}
 
 func TestDenyArgsAccepted(t *testing.T) {
 	y := strings.Replace(validYAML, "[attachment.path]", `[attachment.path, path, "a-b.c_d.Éé"]`, 1)

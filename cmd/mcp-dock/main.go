@@ -2,7 +2,7 @@
 // HTTP MCP servers (usually mcp-runner containers).
 //
 //	mcp-dock serve [-config path]
-//	mcp-dock users reset [-config path] <login | wallet address | oidc:<provider>:<value>>
+//	mcp-dock users reset [-config path] <login | github:<login> | oidc:<provider>:<value>>
 //	mcp-dock version
 //
 // The config path defaults to $MCP_DOCK_CONFIG, else ./config.yaml.
@@ -42,7 +42,7 @@ const (
 
 const usage = `usage:
   mcp-dock serve [-config path]
-  mcp-dock users reset [-config path] <login | wallet address | oidc:<provider>:<value>>
+  mcp-dock users reset [-config path] <login | github:<login> | oidc:<provider>:<value>>
   mcp-dock version
 config path defaults to $MCP_DOCK_CONFIG, else ./config.yaml`
 
@@ -197,7 +197,7 @@ func serve(ctx context.Context, cfg *config.Config, stdout io.Writer) error {
 
 	log.Info("mcp-dock listening", "addr", ln.Addr().String(), "public_url", cfg.PublicURL,
 		"version", version, "upstreams", names, "allowed_github", len(cfg.AllowedUsers.GitHub),
-		"allowed_open_payments", len(cfg.AllowedUsers.OpenPayments), "allowed_oidc", allowedOIDC)
+		"allowed_oidc", allowedOIDC)
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()

@@ -14,10 +14,6 @@ body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0
 h1{font-size:1.4rem}
 .box{border:1px solid #ccc;border-radius:6px;padding:1rem;margin:1rem 0;overflow-wrap:anywhere}
 button{font-size:1rem;padding:.5rem 1.2rem;margin-right:.5rem;cursor:pointer}
-label{display:block;margin-bottom:.3rem}
-input[type=text]{font-size:1rem;padding:.4rem;width:100%;box-sizing:border-box;margin-bottom:.6rem}
-.or{text-align:center;color:#666}
-.error{color:#a00}
 </style>`
 
 var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
@@ -53,20 +49,6 @@ var signinTmpl = template.Must(template.New("signin").Parse(`<!doctype html>
 <button type="submit">{{.Label}}</button>
 </form>
 {{- end}}
-{{- if and .Buttons .OpenPayments}}
-<p class="or">or</p>
-{{- end}}
-{{- if .OpenPayments}}
-<form method="post" action="/oauth/open-payments/start">
-<input type="hidden" name="request" value="{{.RequestID}}">
-<label for="wallet">Open Payments wallet address</label>
-<input type="text" id="wallet" name="wallet" value="{{.Wallet}}" placeholder="$ilp.interledger-test.dev/alice" autocomplete="off" autocapitalize="off" spellcheck="false" required>
-{{- if .Error}}
-<p class="error" role="alert">{{.Error}}</p>
-{{- end}}
-<button type="submit">Continue with wallet</button>
-</form>
-{{- end}}
 </body></html>
 `))
 
@@ -84,9 +66,8 @@ type consentData struct {
 }
 
 type signinData struct {
-	ClientName, RequestID, Wallet, Error string
-	Buttons                              []signinButton // GitHub first, then OIDC in config order
-	OpenPayments                         bool
+	ClientName, RequestID string
+	Buttons               []signinButton // GitHub first, then OIDC in config order
 }
 
 // signinButton is one provider's sign-in form: a POST to Action carrying

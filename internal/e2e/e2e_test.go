@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -32,7 +33,6 @@ import (
 
 	"github.com/bithyte/mcp-dock/internal/app"
 	"github.com/bithyte/mcp-dock/internal/config"
-	"github.com/bithyte/mcp-dock/internal/identity"
 	"github.com/bithyte/mcp-dock/internal/runner"
 	"github.com/bithyte/mcp-dock/internal/store"
 	"github.com/bithyte/mcp-dock/internal/testutil"
@@ -49,9 +49,6 @@ const (
 	ghClientID     = "gh-cid"
 	ghClientSecret = "gh-secret"
 	clientRedirect = "http://127.0.0.1:33333/callback"
-	// The fake verifies grant signatures against the public key directly,
-	// so any https URL works as the gateway's own wallet.
-	gatewayWallet = "https://gateway.example/wallet"
 
 	oidcClientID     = "oidc-cid"
 	oidcClientSecret = "oidc-secret"
@@ -94,13 +91,10 @@ type env struct {
 	ts   *httptest.Server
 	cfg  *config.Config
 	fake *testutil.FakeGitHub
-	op   *testutil.FakeOpenPayments
 	oidc *testutil.FakeOIDC
 	logs *logBuffer
 	app  *app.App
 	st   *store.Store
-	// aliceWallet is the normalized address of the fake's "alice" wallet.
-	aliceWallet string
 	// fakeURL is the runner endpoint behind the "fake" upstream.
 	fakeURL string
 }
@@ -112,9 +106,9 @@ type envOpts struct {
 }
 
 // newEnv starts the full gateway with the fake upstream (behind a runner) as
-// "fake" (deny_args [attachment.path]) plus any extra upstreams. Both login
-// providers are on. Allowlists: GitHub alice and friend, and the fake
-// wallet "alice".
+// "fake" (deny_args [attachment.path]) plus any extra upstreams. GitHub and
+// the "wallet" OIDC provider are on. Allowlists: GitHub alice and friend,
+// and OIDC subs oidcAlice and "alice".
 func newEnv(t *testing.T, extra ...config.UpstreamConfig) *env {
 	t.Helper()
 	return newEnvWith(t, envOpts{}, extra...)
@@ -133,14 +127,7 @@ func newEnvWith(t *testing.T, o envOpts, extra ...config.UpstreamConfig) *env {
 		fake.BearerTokenEnv, fake.BearerToken = "FAKE_RUNNER_TOKEN", o.bearer
 	}
 	e.fake = testutil.NewFakeGitHub(t, ghClientID, ghClientSecret)
-	keyPEM, pub := testutil.Ed25519PEM(t)
-	e.op = testutil.NewFakeOpenPayments(t, gatewayWallet, pub)
 	e.oidc = testutil.NewFakeOIDC(t, oidcClientID, oidcClientSecret, testutil.FakeOIDCOptions{})
-	aliceWallet, err := identity.NormalizeWalletAddress(e.op.Wallet("alice"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.aliceWallet = aliceWallet
 
 	// public_url must be known before the handler is built, so start the
 	// listener first and attach the handler afterwards.
@@ -152,9 +139,6 @@ func newEnvWith(t *testing.T, o envOpts, extra ...config.UpstreamConfig) *env {
 		DataDir:   t.TempDir(),
 		Providers: config.ProvidersConfig{
 			GitHub: &config.GitHubConfig{ClientID: ghClientID, ClientSecret: ghClientSecret},
-			OpenPayments: &config.OpenPaymentsConfig{
-				WalletAddress: gatewayWallet, KeyID: "e2e-key", PrivateKey: keyPEM,
-			},
 			OIDC: []config.OIDCConfig{{
 				Name: "wallet", Label: "Open Payments wallet", Issuer: e.oidc.Issuer(),
 				ClientID: oidcClientID, ClientSecret: oidcClientSecret,
@@ -162,9 +146,8 @@ func newEnvWith(t *testing.T, o envOpts, extra ...config.UpstreamConfig) *env {
 			}},
 		},
 		AllowedUsers: config.AllowedUsers{
-			GitHub:       []string{"alice", "friend"},
-			OpenPayments: []string{aliceWallet},
-			OIDC:         map[string][]string{"wallet": {oidcAlice, "alice"}},
+			GitHub: []string{"alice", "friend"},
+			OIDC:   map[string][]string{"wallet": {oidcAlice, "alice"}},
 		},
 		Upstreams: append([]config.UpstreamConfig{fake}, extra...),
 	}
@@ -180,7 +163,6 @@ func newEnvWith(t *testing.T, o envOpts, extra ...config.UpstreamConfig) *env {
 		Version:          "test",
 		GitHubWebBaseURL: e.fake.URL,
 		GitHubAPIBaseURL: e.fake.URL,
-		OpenPaymentsHTTP: e.op.Client(),
 		MinBackoff:       50 * time.Millisecond,
 		MaxBackoff:       200 * time.Millisecond,
 	})
@@ -331,37 +313,6 @@ func (e *env) login(t *testing.T, ghLogin string, ghID int64) string {
 	expect(t, "github", resp, body, http.StatusFound)
 	resp, body = rd.read(b.Get(resp.Header.Get("Location"))) // our callback
 	expect(t, "callback", resp, body, http.StatusOK)
-	return e.finish(t, b, body, clientID, verifier)
-}
-
-// walletLogin is login for the Open Payments wallet called name on the fake:
-// wallet form, the user approving at the wallet provider, callback, consent
-// and token.
-func (e *env) walletLogin(t *testing.T, name string) string {
-	t.Helper()
-	rd := reader{t}
-	b, reqID, clientID, verifier := e.signIn(t)
-	resp, body := rd.read(b.PostForm(e.ts.URL+"/oauth/open-payments/start", url.Values{
-		"request": {reqID}, "wallet": {e.op.Wallet(name)},
-	}))
-	expect(t, "wallet start", resp, body, http.StatusFound)
-	interact := resp.Header.Get("Location")
-	if !strings.HasPrefix(interact, e.op.URL+"/interact/") {
-		t.Fatalf("wallet start Location %q", interact)
-	}
-	// The user approves at the wallet provider, which sends the browser back.
-	hc := *e.op.Client()
-	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	resp, _ = rd.read(hc.Get(interact))
-	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("fake interact: status %d", resp.StatusCode)
-	}
-	cb := resp.Header.Get("Location")
-	if !strings.HasPrefix(cb, e.ts.URL+"/oauth/open-payments/callback?") {
-		t.Fatalf("interact Location %q", cb)
-	}
-	resp, body = rd.read(b.Get(cb))
-	expect(t, "wallet callback", resp, body, http.StatusOK)
 	return e.finish(t, b, body, clientID, verifier)
 }
 
@@ -755,33 +706,6 @@ func TestEndToEndSessionBoundToUser(t *testing.T) {
 	}
 }
 
-func TestEndToEndWallet(t *testing.T) {
-	e := newEnv(t)
-	token := e.walletLogin(t, "alice")
-	cs := e.connect(t, token, nil)
-	waitTools(t, cs, "fake__echo")
-	if res := call(t, cs, "fake__echo", map[string]any{"text": "hi"}); res.IsError || resultText(res) != "hi" {
-		t.Fatalf("echo: isError=%v %q", res.IsError, resultText(res))
-	}
-
-	want := identity.WalletUser(e.aliceWallet)
-	var logged bool
-	for _, r := range e.logs.records("tool call") {
-		if r["tool"] == "fake__echo" {
-			logged = true
-			if r["user"] != want || r["ok"] != true {
-				t.Errorf("audit record %v, want user %s ok true", r, want)
-			}
-		}
-	}
-	if !logged {
-		t.Fatalf("no audit record for fake__echo in logs:\n%s", e.logs)
-	}
-	if strings.Contains(e.logs.String(), token) {
-		t.Fatal("access token appears in logs")
-	}
-}
-
 func TestEndToEndOIDC(t *testing.T) {
 	e := newEnv(t)
 	token := e.oidcLogin(t, oidcAlice)
@@ -809,49 +733,81 @@ func TestEndToEndOIDC(t *testing.T) {
 	}
 }
 
-// A GitHub user and a wallet user that share the name "alice" are two
+// initialize posts an MCP initialize with token and returns the status.
+func (e *env) initialize(t *testing.T, token string) int {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, e.cfg.ResourceURL(), strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, _ := reader{t}.read(http.DefaultClient.Do(req))
+	return resp.StatusCode
+}
+
+// A GitHub user and an OIDC user that share the name "alice" are two
 // users: separate audit identities, and resetting one leaves the other.
 func TestEndToEndSameNameDifferentUsers(t *testing.T) {
 	e := newEnv(t)
 	ghToken := e.login(t, "alice", 1)
-	walletToken := e.walletLogin(t, "alice")
+	oidcToken := e.oidcLogin(t, "alice")
 	gh := e.connect(t, ghToken, nil)
-	wallet := e.connect(t, walletToken, nil)
+	oidcCS := e.connect(t, oidcToken, nil)
 	waitTools(t, gh, "fake__echo")
-	waitTools(t, wallet, "fake__echo")
+	waitTools(t, oidcCS, "fake__echo")
 	call(t, gh, "fake__echo", map[string]any{"text": "gh"})
-	call(t, wallet, "fake__echo", map[string]any{"text": "wallet"})
+	call(t, oidcCS, "fake__echo", map[string]any{"text": "oidc"})
 
-	walletUID := identity.WalletUser(e.aliceWallet)
+	const oidcUID = "oidc:wallet:alice"
 	users := map[string]bool{}
 	for _, r := range e.logs.records("tool call") {
 		users[r["user"].(string)] = true
 	}
-	if len(users) != 2 || !users["github:alice"] || !users[walletUID] {
-		t.Fatalf("audit users %v, want github:alice and %s", users, walletUID)
+	if len(users) != 2 || !users["github:alice"] || !users[oidcUID] {
+		t.Fatalf("audit users %v, want github:alice and %s", users, oidcUID)
 	}
 
-	// What `users reset <wallet address>` does.
-	if err := e.st.ResetUser(context.Background(), walletUID); err != nil {
+	// What `users reset oidc:wallet:alice` does.
+	if err := e.st.ResetUser(context.Background(), oidcUID); err != nil {
 		t.Fatal(err)
 	}
-	initialize := func(token string) int {
-		req, _ := http.NewRequest(http.MethodPost, e.cfg.ResourceURL(), strings.NewReader(
-			`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json, text/event-stream")
-		req.Header.Set("Authorization", "Bearer "+token)
-		resp, _ := reader{t}.read(http.DefaultClient.Do(req))
-		return resp.StatusCode
+	if got := e.initialize(t, oidcToken); got != http.StatusUnauthorized {
+		t.Fatalf("oidc token after reset: status %d, want 401", got)
 	}
-	if got := initialize(walletToken); got != http.StatusUnauthorized {
-		t.Fatalf("wallet token after reset: status %d, want 401", got)
-	}
-	if got := initialize(ghToken); got != http.StatusOK {
-		t.Fatalf("github token after wallet reset: status %d, want 200", got)
+	if got := e.initialize(t, ghToken); got != http.StatusOK {
+		t.Fatalf("github token after oidc reset: status %d, want 200", got)
 	}
 	if res := call(t, gh, "fake__echo", map[string]any{"text": "still"}); resultText(res) != "still" {
 		t.Fatalf("github echo after reset: %q", resultText(res))
+	}
+}
+
+// An access token issued to a built-in Open Payments user before the login
+// was removed stops working, even though the same wallet is allowlisted as
+// an OIDC sub.
+func TestEndToEndOldWalletTokenRejected(t *testing.T) {
+	e := newEnv(t)
+	save := func(login string) string {
+		t.Helper()
+		b := make([]byte, 32)
+		rand.Read(b)
+		token := base64.RawURLEncoding.EncodeToString(b)
+		sum := sha256.Sum256([]byte(token))
+		if err := e.st.SaveToken(context.Background(), store.Token{
+			Hash: hex.EncodeToString(sum[:]), Kind: "access", ClientID: "old-client", Login: login,
+			Resource: e.cfg.ResourceURL(), Scope: "", ExpiresAt: time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return token
+	}
+	if got := e.initialize(t, save("open_payments:https://ilp.interledger-test.dev/alice")); got != http.StatusUnauthorized {
+		t.Fatalf("old wallet token: status %d, want 401", got)
+	}
+	// The same stored token shape for the OIDC id works, so the 401 is
+	// about the login, not the token.
+	if got := e.initialize(t, save("oidc:wallet:"+oidcAlice)); got != http.StatusOK {
+		t.Fatalf("oidc token: status %d, want 200", got)
 	}
 }
 
@@ -1008,10 +964,8 @@ func TestEndToEndRunnerRestart(t *testing.T) {
 func TestEndToEndIdentity(t *testing.T) {
 	e := newEnv(t)
 	gh := e.connect(t, e.login(t, "Alice", 1), nil)
-	wallet := e.connect(t, e.walletLogin(t, "alice"), nil)
 	oidcCS := e.connect(t, e.oidcLogin(t, oidcAlice), nil)
 	waitTools(t, gh, "fake__whoami")
-	waitTools(t, wallet, "fake__whoami")
 	waitTools(t, oidcCS, "fake__whoami")
 
 	who := func(provider, id string) string {
@@ -1024,10 +978,6 @@ func TestEndToEndIdentity(t *testing.T) {
 	if got, want := resultText(call(t, gh, "fake__whoami", map[string]any{})), who("github", "alice"); got != want {
 		t.Fatalf("github whoami = %s, want %s", got, want)
 	}
-	if got, want := resultText(call(t, wallet, "fake__whoami", map[string]any{})), who("open_payments", e.aliceWallet); got != want {
-		t.Fatalf("wallet whoami = %s, want %s", got, want)
-	}
-
 	if got, want := resultText(call(t, oidcCS, "fake__whoami", map[string]any{})), who("oidc:wallet", oidcAlice); got != want {
 		t.Fatalf("oidc whoami = %s, want %s", got, want)
 	}
@@ -1037,11 +987,11 @@ func TestEndToEndIdentity(t *testing.T) {
 		Arguments: map[string]any{},
 		Meta:      mcp.Meta{upstream.UserMetaKey: map[string]any{"provider": "github", "id": "mallory"}},
 	}
-	res, err := wallet.CallTool(context.Background(), spoof)
+	res, err := gh.CallTool(context.Background(), spoof)
 	if err != nil {
 		t.Fatalf("spoofed call: %v", err)
 	}
-	if got, want := resultText(res), who("open_payments", e.aliceWallet); got != want {
+	if got, want := resultText(res), who("github", "alice"); got != want {
 		t.Fatalf("spoofed whoami = %s, want %s", got, want)
 	}
 
