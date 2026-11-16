@@ -39,22 +39,22 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 </body></html>
 `))
 
-// signinTmpl is the provider choice (layout A in the design). Both forms
-// carry the request id like the consent form, for the same CSRF reasons.
+// signinTmpl is the provider choice (layout A in the design). Every form
+// carries the request id like the consent form, for the same CSRF reasons.
 var signinTmpl = template.Must(template.New("signin").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sign in to mcp-dock</title>` + pageStyle + `</head>
 <body>
 <h1>Sign in to mcp-dock</h1>
 <p><strong>{{.ClientName}}</strong> wants to use the tools on this gateway. Sign in first.</p>
-{{- if .GitHub}}
-<form method="post" action="/oauth/github/start">
-<input type="hidden" name="request" value="{{.RequestID}}">
-<button type="submit">Continue with GitHub</button>
+{{- range .Buttons}}
+<form method="post" action="{{.Action}}">
+<input type="hidden" name="request" value="{{$.RequestID}}">
+<button type="submit">{{.Label}}</button>
 </form>
-{{- if .OpenPayments}}
-<p class="or">or</p>
 {{- end}}
+{{- if and .Buttons .OpenPayments}}
+<p class="or">or</p>
 {{- end}}
 {{- if .OpenPayments}}
 <form method="post" action="/oauth/open-payments/start">
@@ -85,7 +85,14 @@ type consentData struct {
 
 type signinData struct {
 	ClientName, RequestID, Wallet, Error string
-	GitHub, OpenPayments                 bool
+	Buttons                              []signinButton // GitHub first, then OIDC in config order
+	OpenPayments                         bool
+}
+
+// signinButton is one provider's sign-in form: a POST to Action carrying
+// the request id.
+type signinButton struct {
+	Action, Label string
 }
 
 type errorData struct {

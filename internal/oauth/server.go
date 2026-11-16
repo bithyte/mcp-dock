@@ -1,6 +1,6 @@
 // Package oauth is the gateway's OAuth 2.1 authorization server. It issues its
-// own tokens to MCP clients and delegates user login to GitHub or an Open
-// Payments wallet.
+// own tokens to MCP clients and delegates user login to GitHub, an Open
+// Payments wallet, or configured OpenID Connect providers.
 package oauth
 
 import (
@@ -16,6 +16,7 @@ import (
 
 	"github.com/bithyte/mcp-dock/internal/config"
 	"github.com/bithyte/mcp-dock/internal/github"
+	"github.com/bithyte/mcp-dock/internal/oidclogin"
 	"github.com/bithyte/mcp-dock/internal/oplogin"
 	"github.com/bithyte/mcp-dock/internal/store"
 )
@@ -29,8 +30,10 @@ type Options struct {
 	GitHub *github.Client // nil when GitHub login is not configured
 	// OpenPayments is nil when Open Payments login is not configured.
 	OpenPayments *oplogin.Client
-	Logger       *slog.Logger
-	Now          func() time.Time // default time.Now
+	// OIDC holds one client per configured OIDC provider, in config order.
+	OIDC   []*oidclogin.Client
+	Logger *slog.Logger
+	Now    func() time.Time // default time.Now
 }
 
 type Server struct {
@@ -38,12 +41,13 @@ type Server struct {
 	store *store.Store
 	gh    *github.Client
 	op    *oplogin.Client
+	oidc  []*oidclogin.Client
 	log   *slog.Logger
 	now   func() time.Time
 }
 
 func New(opts Options) *Server {
-	s := &Server{cfg: opts.Config, store: opts.Store, gh: opts.GitHub, op: opts.OpenPayments, log: opts.Logger, now: opts.Now}
+	s := &Server{cfg: opts.Config, store: opts.Store, gh: opts.GitHub, op: opts.OpenPayments, oidc: opts.OIDC, log: opts.Logger, now: opts.Now}
 	if s.log == nil {
 		s.log = slog.Default()
 	}
@@ -56,7 +60,7 @@ func New(opts Options) *Server {
 // Routes registers every oauth path on mux. Every POST goes through
 // limitBody. The consent POST is /oauth/consent (not /consent) so the
 // mcpdock_auth cookie, scoped to /oauth/, is sent with it. The same goes
-// for the sign-in buttons and the Open Payments callback. Provider routes
+// for the sign-in buttons and the Open Payments and OIDC callbacks. Provider routes
 // exist only for configured providers.
 func (s *Server) Routes(mux *http.ServeMux) {
 	prm := cors(http.HandlerFunc(s.handleProtectedResource))
@@ -80,6 +84,14 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	if s.op != nil {
 		mux.Handle("POST "+opStartPath, limitBody(http.HandlerFunc(s.handleOPStart)))
 		mux.Handle("GET "+opCallbackPath, http.HandlerFunc(s.handleOPCallback))
+	}
+	for _, c := range s.oidc {
+		mux.Handle("POST "+oidcStartPath(c.Name()), limitBody(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s.handleOIDCStart(w, r, c)
+		})))
+		mux.Handle("GET "+oidcCallbackPath(c.Name()), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s.handleOIDCCallback(w, r, c)
+		}))
 	}
 	mux.Handle("POST "+consentPath, limitBody(http.HandlerFunc(s.handleConsent)))
 	tok := cors(limitBody(http.HandlerFunc(s.handleToken)))

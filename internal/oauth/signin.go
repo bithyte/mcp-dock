@@ -7,6 +7,7 @@ import (
 	"net/url"
 
 	"github.com/bithyte/mcp-dock/internal/identity"
+	"github.com/bithyte/mcp-dock/internal/oidclogin"
 	"github.com/bithyte/mcp-dock/internal/oplogin"
 	"github.com/bithyte/mcp-dock/internal/store"
 )
@@ -20,8 +21,9 @@ const (
 // starting an upstream login and its callback. It holds secrets (nonces,
 // continue token) and is never logged.
 type pendingLogin struct {
-	Provider     identity.Provider `json:"provider"`
-	OpenPayments *oplogin.Pending  `json:"open_payments,omitempty"`
+	Provider     identity.Provider  `json:"provider"`
+	OpenPayments *oplogin.Pending   `json:"open_payments,omitempty"`
+	OIDC         *oidclogin.Pending `json:"oidc,omitempty"`
 }
 
 // signin renders the sign-in page for the auth request id. wallet is the
@@ -31,12 +33,19 @@ func (s *Server) signin(w http.ResponseWriter, status int, clientName, id, walle
 	if clientName == "" {
 		clientName = "Unnamed app"
 	}
+	var buttons []signinButton
+	if s.gh != nil {
+		buttons = append(buttons, signinButton{Action: githubStartPath, Label: "Continue with GitHub"})
+	}
+	for _, c := range s.oidc {
+		buttons = append(buttons, signinButton{Action: oidcStartPath(c.Name()), Label: "Continue with " + s.oidcLabel(c)})
+	}
 	s.writeHTML(w, status, signinTmpl, signinData{
 		ClientName:   clientName,
 		RequestID:    id,
 		Wallet:       wallet,
 		Error:        errMsg,
-		GitHub:       s.gh != nil,
+		Buttons:      buttons,
 		OpenPayments: s.op != nil,
 	})
 }

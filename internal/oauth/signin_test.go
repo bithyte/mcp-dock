@@ -128,6 +128,10 @@ func TestAuthorizeShowsSigninPage(t *testing.T) {
 	if strings.Count(body, `name="request"`) != 2 {
 		t.Errorf("want a request field on both forms: %s", body)
 	}
+	// The provider buttons come first, then the wallet form.
+	if gh, op := strings.Index(body, `action="/oauth/github/start"`), strings.Index(body, `action="/oauth/open-payments/start"`); gh > op {
+		t.Errorf("GitHub button after the wallet form: %s", body)
+	}
 	if consentRequestID(t, body) != jarAuthCookie(c, ts).Value {
 		t.Error("request field doesn't match cookie")
 	}
