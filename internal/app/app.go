@@ -16,6 +16,7 @@ import (
 	"github.com/bithyte/mcp-dock/internal/github"
 	"github.com/bithyte/mcp-dock/internal/httpserver"
 	"github.com/bithyte/mcp-dock/internal/oauth"
+	"github.com/bithyte/mcp-dock/internal/oidclogin"
 	"github.com/bithyte/mcp-dock/internal/oplogin"
 	"github.com/bithyte/mcp-dock/internal/store"
 	"github.com/bithyte/mcp-dock/internal/upstream"
@@ -30,6 +31,7 @@ type Options struct {
 	GitHubAPIBaseURL string       // default https://api.github.com
 	GitHubHTTP       *http.Client // default: the github package's client
 	OpenPaymentsHTTP *http.Client // default: the oplogin package's client
+	OIDCHTTP         *http.Client // default: the oidclogin package's client
 	MinBackoff       time.Duration
 	MaxBackoff       time.Duration
 	Now              func() time.Time // oauth clock, default time.Now
@@ -95,10 +97,23 @@ func Build(cfg *config.Config, log *slog.Logger, st *store.Store, opts Options) 
 			HTTP:         opts.GitHubHTTP,
 		}
 	}
+	oidcClients := make([]*oidclogin.Client, 0, len(cfg.Providers.OIDC))
+	for _, p := range cfg.Providers.OIDC {
+		oidcClients = append(oidcClients, oidclogin.New(oidclogin.Config{
+			Name:         p.Name,
+			Issuer:       p.Issuer,
+			ClientID:     p.ClientID,
+			ClientSecret: p.ClientSecret,
+			Scopes:       p.Scopes,
+			UserClaim:    p.UserClaim,
+			HTTP:         opts.OIDCHTTP,
+		}))
+	}
 	a.OAuth = oauth.New(oauth.Options{
 		Config:       cfg,
 		Store:        st,
 		GitHub:       gh,
+		OIDC:         oidcClients,
 		OpenPayments: op,
 		Logger:       log,
 		Now:          opts.Now,

@@ -52,6 +52,10 @@ const (
 	// The fake verifies grant signatures against the public key directly,
 	// so any https URL works as the gateway's own wallet.
 	gatewayWallet = "https://gateway.example/wallet"
+
+	oidcClientID     = "oidc-cid"
+	oidcClientSecret = "oidc-secret"
+	oidcAlice        = "https://ilp.interledger-test.dev/alice"
 )
 
 // logBuffer is a goroutine-safe log sink.
@@ -91,6 +95,7 @@ type env struct {
 	cfg  *config.Config
 	fake *testutil.FakeGitHub
 	op   *testutil.FakeOpenPayments
+	oidc *testutil.FakeOIDC
 	logs *logBuffer
 	app  *app.App
 	st   *store.Store
@@ -130,6 +135,7 @@ func newEnvWith(t *testing.T, o envOpts, extra ...config.UpstreamConfig) *env {
 	e.fake = testutil.NewFakeGitHub(t, ghClientID, ghClientSecret)
 	keyPEM, pub := testutil.Ed25519PEM(t)
 	e.op = testutil.NewFakeOpenPayments(t, gatewayWallet, pub)
+	e.oidc = testutil.NewFakeOIDC(t, oidcClientID, oidcClientSecret, testutil.FakeOIDCOptions{})
 	aliceWallet, err := identity.NormalizeWalletAddress(e.op.Wallet("alice"))
 	if err != nil {
 		t.Fatal(err)
@@ -149,9 +155,18 @@ func newEnvWith(t *testing.T, o envOpts, extra ...config.UpstreamConfig) *env {
 			OpenPayments: &config.OpenPaymentsConfig{
 				WalletAddress: gatewayWallet, KeyID: "e2e-key", PrivateKey: keyPEM,
 			},
+			OIDC: []config.OIDCConfig{{
+				Name: "wallet", Label: "Open Payments wallet", Issuer: e.oidc.Issuer(),
+				ClientID: oidcClientID, ClientSecret: oidcClientSecret,
+				Scopes: []string{"openid"}, UserClaim: "sub",
+			}},
 		},
-		AllowedUsers: config.AllowedUsers{GitHub: []string{"alice", "friend"}, OpenPayments: []string{aliceWallet}},
-		Upstreams:    append([]config.UpstreamConfig{fake}, extra...),
+		AllowedUsers: config.AllowedUsers{
+			GitHub:       []string{"alice", "friend"},
+			OpenPayments: []string{aliceWallet},
+			OIDC:         map[string][]string{"wallet": {oidcAlice, "alice"}},
+		},
+		Upstreams: append([]config.UpstreamConfig{fake}, extra...),
 	}
 	log := slog.New(slog.NewJSONHandler(e.logs, nil))
 
@@ -347,6 +362,30 @@ func (e *env) walletLogin(t *testing.T, name string) string {
 	}
 	resp, body = rd.read(b.Get(cb))
 	expect(t, "wallet callback", resp, body, http.StatusOK)
+	return e.finish(t, b, body, clientID, verifier)
+}
+
+// oidcLogin is login for the "wallet" OIDC provider with the given sub:
+// sign-in button, the IdP hop, callback, consent and token.
+func (e *env) oidcLogin(t *testing.T, sub string) string {
+	t.Helper()
+	rd := reader{t}
+	e.oidc.SetSub(sub)
+	b, reqID, clientID, verifier := e.signIn(t)
+	resp, body := rd.read(b.PostForm(e.ts.URL+"/oauth/oidc/wallet/start", url.Values{"request": {reqID}}))
+	expect(t, "oidc start", resp, body, http.StatusFound)
+	authURL := resp.Header.Get("Location")
+	if !strings.HasPrefix(authURL, e.oidc.URL+"/authorize?") {
+		t.Fatalf("oidc start Location %q", authURL)
+	}
+	resp, body = rd.read(newBrowser(t).Get(authURL)) // fake IdP, auto-approves
+	expect(t, "oidc idp", resp, body, http.StatusFound)
+	cb := resp.Header.Get("Location")
+	if !strings.HasPrefix(cb, e.ts.URL+"/oauth/oidc/wallet/callback?") {
+		t.Fatalf("idp Location %q", cb)
+	}
+	resp, body = rd.read(b.Get(cb))
+	expect(t, "oidc callback", resp, body, http.StatusOK)
 	return e.finish(t, b, body, clientID, verifier)
 }
 
@@ -743,6 +782,33 @@ func TestEndToEndWallet(t *testing.T) {
 	}
 }
 
+func TestEndToEndOIDC(t *testing.T) {
+	e := newEnv(t)
+	token := e.oidcLogin(t, oidcAlice)
+	cs := e.connect(t, token, nil)
+	waitTools(t, cs, "fake__echo")
+	if res := call(t, cs, "fake__echo", map[string]any{"text": "hi"}); res.IsError || resultText(res) != "hi" {
+		t.Fatalf("echo: isError=%v %q", res.IsError, resultText(res))
+	}
+
+	want := "oidc:wallet:" + oidcAlice
+	var logged bool
+	for _, r := range e.logs.records("tool call") {
+		if r["tool"] == "fake__echo" {
+			logged = true
+			if r["user"] != want || r["ok"] != true {
+				t.Errorf("audit record %v, want user %s ok true", r, want)
+			}
+		}
+	}
+	if !logged {
+		t.Fatalf("no audit record for fake__echo in logs:\n%s", e.logs)
+	}
+	if strings.Contains(e.logs.String(), token) {
+		t.Fatal("access token appears in logs")
+	}
+}
+
 // A GitHub user and a wallet user that share the name "alice" are two
 // users: separate audit identities, and resetting one leaves the other.
 func TestEndToEndSameNameDifferentUsers(t *testing.T) {
@@ -943,8 +1009,10 @@ func TestEndToEndIdentity(t *testing.T) {
 	e := newEnv(t)
 	gh := e.connect(t, e.login(t, "Alice", 1), nil)
 	wallet := e.connect(t, e.walletLogin(t, "alice"), nil)
+	oidcCS := e.connect(t, e.oidcLogin(t, oidcAlice), nil)
 	waitTools(t, gh, "fake__whoami")
 	waitTools(t, wallet, "fake__whoami")
+	waitTools(t, oidcCS, "fake__whoami")
 
 	who := func(provider, id string) string {
 		b, err := json.Marshal(map[string]string{"provider": provider, "id": id})
@@ -960,6 +1028,10 @@ func TestEndToEndIdentity(t *testing.T) {
 		t.Fatalf("wallet whoami = %s, want %s", got, want)
 	}
 
+	if got, want := resultText(call(t, oidcCS, "fake__whoami", map[string]any{})), who("oidc:wallet", oidcAlice); got != want {
+		t.Fatalf("oidc whoami = %s, want %s", got, want)
+	}
+
 	spoof := &mcp.CallToolParams{
 		Name:      "fake__whoami",
 		Arguments: map[string]any{},
@@ -971,5 +1043,13 @@ func TestEndToEndIdentity(t *testing.T) {
 	}
 	if got, want := resultText(res), who("open_payments", e.aliceWallet); got != want {
 		t.Fatalf("spoofed whoami = %s, want %s", got, want)
+	}
+
+	res, err = oidcCS.CallTool(context.Background(), spoof)
+	if err != nil {
+		t.Fatalf("spoofed oidc call: %v", err)
+	}
+	if got, want := resultText(res), who("oidc:wallet", oidcAlice); got != want {
+		t.Fatalf("spoofed oidc whoami = %s, want %s", got, want)
 	}
 }

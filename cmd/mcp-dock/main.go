@@ -2,7 +2,7 @@
 // HTTP MCP servers (usually mcp-runner containers).
 //
 //	mcp-dock serve [-config path]
-//	mcp-dock users reset [-config path] <login | wallet address>
+//	mcp-dock users reset [-config path] <login | wallet address | oidc:<provider>:<value>>
 //	mcp-dock version
 //
 // The config path defaults to $MCP_DOCK_CONFIG, else ./config.yaml.
@@ -42,7 +42,7 @@ const (
 
 const usage = `usage:
   mcp-dock serve [-config path]
-  mcp-dock users reset [-config path] <login | wallet address>
+  mcp-dock users reset [-config path] <login | wallet address | oidc:<provider>:<value>>
   mcp-dock version
 config path defaults to $MCP_DOCK_CONFIG, else ./config.yaml`
 
@@ -142,6 +142,7 @@ func resetUser(ctx context.Context, cfg *config.Config, arg string, stdout io.Wr
 	if err != nil {
 		return usageError("users reset: %v", err)
 	}
+	uid = cfg.CanonicalUser(uid)
 	st, err := openStore(cfg)
 	if err != nil {
 		return err
@@ -189,9 +190,14 @@ func serve(ctx context.Context, cfg *config.Config, stdout io.Writer) error {
 	wg.Go(func() { a.RunUpstreams(upCtx) })
 	wg.Go(func() { cleanupLoop(upCtx, st, log) })
 
+	allowedOIDC := 0
+	for _, entries := range cfg.AllowedUsers.OIDC {
+		allowedOIDC += len(entries)
+	}
+
 	log.Info("mcp-dock listening", "addr", ln.Addr().String(), "public_url", cfg.PublicURL,
 		"version", version, "upstreams", names, "allowed_github", len(cfg.AllowedUsers.GitHub),
-		"allowed_open_payments", len(cfg.AllowedUsers.OpenPayments))
+		"allowed_open_payments", len(cfg.AllowedUsers.OpenPayments), "allowed_oidc", allowedOIDC)
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()

@@ -135,6 +135,79 @@ func TestUsersReset(t *testing.T) {
 	}
 }
 
+func TestUsersResetOIDC(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	cfg := fmt.Sprintf(`public_url: http://localhost:8080
+listen: ":8080"
+data_dir: %s
+providers:
+  github:
+    client_id: cid
+    client_secret_env: GH_SECRET
+  oidc:
+    - name: wallet
+      issuer: https://idp.example
+      client_id: wcid
+      client_secret_env: GH_SECRET
+    - name: corp
+      issuer: https://corp.example
+      client_id: ccid
+      client_secret_env: GH_SECRET
+      user_claim: email
+allowed_users:
+  github: [alice]
+  oidc:
+    wallet: ["https://w.example/Al"]
+    corp: [bob@x.com]
+`, dataDir)
+	p := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dataDir, "gateway.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const cb = "https://a.example/cb"
+	for _, uid := range []string{"oidc:wallet:https://w.example/Al", "oidc:corp:bob@x.com"} {
+		if err := st.SaveConsent(context.Background(), uid, "c", cb); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st.Close()
+
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"users", "reset", "-config", p, "oidc:wallet:https://w.example/Al"}, testGetenv, &out); err != nil {
+		t.Fatalf("run wallet: %v", err)
+	}
+	if want := "reset oidc:wallet:https://w.example/Al: cleared consents and tokens\n"; out.String() != want {
+		t.Errorf("stdout %q, want %q", out.String(), want)
+	}
+	out.Reset()
+	if err := run(context.Background(), []string{"users", "reset", "-config", p, "oidc:corp:Bob@X.com"}, testGetenv, &out); err != nil {
+		t.Fatalf("run corp: %v", err)
+	}
+	if want := "reset oidc:corp:bob@x.com: cleared consents and tokens\n"; out.String() != want {
+		t.Errorf("stdout %q, want %q", out.String(), want)
+	}
+
+	st, err = store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, uid := range []string{"oidc:wallet:https://w.example/Al", "oidc:corp:bob@x.com"} {
+		if has, _ := st.HasConsent(context.Background(), uid, "c", cb); has {
+			t.Errorf("consent for %s not cleared", uid)
+		}
+	}
+}
+
 func TestConfigFromEnv(t *testing.T) {
 	p, dataDir := writeConfig(t, ":8080", "")
 	getenv := func(k string) string {
