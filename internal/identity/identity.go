@@ -17,6 +17,30 @@ const (
 	walletFallback          = "/.well-known/pay"
 )
 
+// OIDCPrefix starts every OIDC provider and user id: "oidc:<name>[:<value>]".
+const OIDCPrefix = "oidc"
+
+// OIDCProvider returns the provider for a configured OIDC provider name.
+func OIDCProvider(name string) Provider {
+	return Provider(OIDCPrefix + ":" + name)
+}
+
+// OIDCUser returns the user id for a claim value at an OIDC provider. The
+// value is used as is; callers normalize it first.
+func OIDCUser(name, value string) string {
+	return string(OIDCProvider(name)) + ":" + value
+}
+
+// OIDCName returns the configured name of an OIDC provider. ok is false for
+// any other provider.
+func (p Provider) OIDCName() (name string, ok bool) {
+	name, found := strings.CutPrefix(string(p), OIDCPrefix+":")
+	if !found || name == "" || strings.Contains(name, ":") {
+		return "", false
+	}
+	return name, true
+}
+
 // GitHubUser returns the user id for a GitHub login.
 func GitHubUser(login string) string {
 	return string(GitHub) + ":" + strings.ToLower(login)
@@ -27,9 +51,17 @@ func WalletUser(normalizedWallet string) string {
 	return string(OpenPayments) + ":" + normalizedWallet
 }
 
-// Split breaks an id on its first colon. ok is false when there is no colon,
-// the name is empty or the provider is unknown.
+// Split breaks an id on its first colon. OIDC ids ("oidc:<name>:<value>") are
+// cut on the first two colons, so the value may contain colons. ok is false
+// when there is no colon, the name is empty or the provider is unknown.
 func Split(id string) (p Provider, name string, ok bool) {
+	if rest, isOIDC := strings.CutPrefix(id, OIDCPrefix+":"); isOIDC {
+		provName, value, found := strings.Cut(rest, ":")
+		if !found || provName == "" || value == "" {
+			return "", "", false
+		}
+		return OIDCProvider(provName), value, true
+	}
 	prefix, name, found := strings.Cut(id, ":")
 	if !found || name == "" {
 		return "", "", false
@@ -127,10 +159,17 @@ func ParseCLIUser(arg string) (string, error) {
 			return "", errors.New("empty github login")
 		}
 		return GitHubUser(login), nil
+	case strings.HasPrefix(arg, OIDCPrefix+":"):
+		name, value, _ := strings.Cut(strings.TrimPrefix(arg, OIDCPrefix+":"), ":")
+		name, value = strings.TrimSpace(name), strings.TrimSpace(value)
+		if name == "" || value == "" {
+			return "", errors.New("oidc user must be oidc:<provider>:<value>")
+		}
+		return OIDCUser(name, value), nil
 	case strings.HasPrefix(arg, "$"), strings.HasPrefix(arg, "https://"):
 		return wallet(arg)
 	case strings.Contains(arg, ":"):
-		return "", fmt.Errorf("unrecognized user %q (use a github login, github:<login>, or an Open Payments wallet address)", arg)
+		return "", fmt.Errorf("unrecognized user %q (use a github login, github:<login>, oidc:<provider>:<value>, or an Open Payments wallet address)", arg)
 	}
 	return GitHubUser(arg), nil
 }
