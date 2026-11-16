@@ -39,7 +39,7 @@ func write(t *testing.T, s string) string {
 	return p
 }
 
-var goodEnv = map[string]string{"GITHUB_CLIENT_SECRET": "s", "JAYPOST_RUNNER_TOKEN": "t", "WALLET_SECRET": "ws"}
+var goodEnv = map[string]string{"GITHUB_CLIENT_SECRET": "s", "JAYPOST_RUNNER_TOKEN": "t", "WALLET_SECRET": "ws", "WALLET_OIDC_SECRET": "wos"}
 
 func TestLoadValid(t *testing.T) {
 	c, err := Load("../../config.example.yaml", env(goodEnv))
@@ -48,6 +48,9 @@ func TestLoadValid(t *testing.T) {
 	}
 	if c.Listen != ":8080" || c.Providers.GitHub.ClientSecret != "s" || len(c.Upstreams) != 1 {
 		t.Fatalf("bad config: %+v", c)
+	}
+	if w := c.OIDCProvider("wallet"); w == nil || w.ClientSecret != "wos" || w.UserClaim != "sub" {
+		t.Fatalf("example wallet provider = %+v", w)
 	}
 	c, err = Load(write(t, validYAML), env(goodEnv))
 	if err != nil {

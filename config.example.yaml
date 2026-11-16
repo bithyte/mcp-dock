@@ -7,11 +7,29 @@ providers:
   github:
     client_id: Ov23liXXXXXXXXXXXXXX
     client_secret_env: GITHUB_CLIENT_SECRET
+  # Any number of OpenID Connect providers. The name shows up in user ids,
+  # allowlist keys and the callback URL (<public_url>/oauth/oidc/<name>/callback).
+  oidc:
+    - name: wallet
+      label: Open Payments wallet
+      issuer: https://oidc.example.com
+      client_id: mcp-dock
+      client_secret_env: WALLET_OIDC_SECRET
+    # A company IdP that identifies people by verified email.
+    # - name: corp
+    #   issuer: https://login.corp.example
+    #   client_id: mcp-dock
+    #   client_secret_env: CORP_OIDC_SECRET
+    #   user_claim: email
+    #   scopes: [openid, email]
 
 allowed_users:
   github:
     - alice-github-login
     - friend-login
+  oidc:
+    wallet:
+      - https://ilp.interledger-test.dev/alice
 
 upstreams:
   # Each upstream is a streamable HTTP MCP endpoint, usually an mcp-runner
