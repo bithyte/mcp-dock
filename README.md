@@ -1,6 +1,6 @@
 # mcp-dock
 
-OAuth-protected MCP gateway. Sits in front of streamable HTTP MCP servers, usually stdio servers (the first one is jaypost) each wrapped by an mcp-runner container, and exposes them at `<public_url>/mcp`. Users sign in with GitHub or with an Open Payments wallet address; only users on an allowlist get in. Every allowed user sees every configured upstream. Tools are exposed as `<upstream>__<tool>`, e.g. `jaypost__ask_user`. Tools only, no resources or prompts.
+OAuth-protected MCP gateway. Sits in front of streamable HTTP MCP servers, usually stdio servers (the first one is jaypost) each wrapped by an mcp-runner container, and exposes them at `<public_url>/mcp`. Users sign in with GitHub or with any OpenID Connect (OIDC) provider; only users on an allowlist get in. Every allowed user sees every configured upstream. Tools are exposed as `<upstream>__<tool>`, e.g. `jaypost__ask_user`. Tools only, no resources or prompts.
 
 The gateway (the Dock) speaks plain HTTP. Put a TLS-terminating reverse proxy in front.
 
@@ -48,7 +48,7 @@ For rootless podman, add `--userns=keep-id:uid=65532,gid=65532` to the run comma
       -v ./config.yaml:/etc/mcp-dock/config.yaml:ro \
       ghcr.io/bithyte/mcp-dock:0.2.0
 
-`mcp-dock.env` holds the Dock's own secrets (`GITHUB_CLIENT_SECRET=...`, `OP_PRIVATE_KEY=...` in its base64 form since env files are one line per var) and the runner bearer tokens your upstreams' `bearer_token_env` name. Upstream secrets (API keys and the like) go in each runner's env, not here. Set `data_dir: /data` in the config. The image's default command is `serve` and `MCP_DOCK_CONFIG` is `/etc/mcp-dock/config.yaml`. Running it with no config doesn't print usage; to check the binary, use `docker run --rm ghcr.io/bithyte/mcp-dock:0.2.0 version`. The same commands work with `docker` in place of `podman`.
+`mcp-dock.env` holds the Dock's own secrets (`GITHUB_CLIENT_SECRET=...`, and one client secret per OIDC provider, e.g. `WALLET_OIDC_SECRET=...`) and the runner bearer tokens your upstreams' `bearer_token_env` name. Upstream secrets (API keys and the like) go in each runner's env, not here. Set `data_dir: /data` in the config. The image's default command is `serve` and `MCP_DOCK_CONFIG` is `/etc/mcp-dock/config.yaml`. Running it with no config doesn't print usage; to check the binary, use `docker run --rm ghcr.io/bithyte/mcp-dock:0.2.0 version`. The same commands work with `docker` in place of `podman`.
 
 The Dock has to reach each runner's URL. With containers, put them on a shared network, as in the [compose example](#compose-example).
 
@@ -254,7 +254,7 @@ Run the check after downloading, before the `gunzip`.
 ## Usage
 
     mcp-dock serve [-config path]
-    mcp-dock users reset [-config path] <login | wallet address>
+    mcp-dock users reset [-config path] <login | github:<login> | oidc:<provider>:<value>>
     mcp-dock version
 
 The config path defaults to `$MCP_DOCK_CONFIG`, else `./config.yaml`. Logs are JSON on stdout. `/healthz` returns `ok` without auth.
@@ -266,18 +266,44 @@ The config path defaults to `$MCP_DOCK_CONFIG`, else `./config.yaml`. Logs are J
 3. Authorization callback URL: `<public_url>/oauth/github/callback`.
 4. Put the client ID in the config (`providers.github.client_id`) and generate a client secret. The secret goes in an env var, never the config.
 
-## Open Payments setup
+## OIDC provider setup
 
-Optional second login method. The user types an Open Payments wallet address; their wallet provider confirms they control it; that address is their identity. The gateway needs a wallet address of its own to ask the provider for that confirmation.
+Any OpenID Connect provider works (Google, Okta, Keycloak, Authentik, single-tenant Entra, a company IdP, open-payments-oidc). You can configure several at once, alongside GitHub. Login is the authorization code flow with PKCE (S256) and a nonce. The ID token is verified (signature against the issuer's JWKS, `iss`, `aud`, `exp`, `nonce`, and `azp` if present). The IdP's access and refresh tokens are discarded after the code exchange.
 
-1. Pick the gateway's wallet address (any wallet you control). It goes in `providers.open_payments.wallet_address`.
-2. In that wallet's developer keys, generate an Ed25519 key pair. Note the key ID; it goes in `key_id`. Download the private key.
-3. Put the private key in an env var, named by `private_key_env` (`OP_PRIVATE_KEY` in the example). The value is the PEM text (`-----BEGIN PRIVATE KEY-----`, PKCS#8) or the base64 of that PEM. It is never a file path; a path is rejected at startup. For base64: `base64 -w0 private.key`.
-4. Add the wallet addresses that may sign in under `allowed_users.open_payments`.
+1. Register mcp-dock at the IdP as a confidential client (one with a client secret). Authorization code flow only.
+2. Redirect URI: `<public_url>/oauth/oidc/<name>/callback`, where `<name>` is the provider's `name` in the config.
+3. Add the provider under `providers.oidc` (see [Config](#config)). The secret goes in an env var named by `client_secret_env`, never the config.
+4. Add who may sign in under `allowed_users.oidc.<name>`.
 
-The grant the gateway requests is subject-only: it asks the wallet provider who the user is, never for an access token, and cancels the grant right after login. No money moves.
+Things to know:
 
-Not tested against a real wallet provider by this repo's tests; they use an in-process fake. Try it against your own wallet before relying on it.
+- `issuer` must match the IdP's own issuer exactly, byte for byte, as in its `/.well-known/openid-configuration`. That includes a trailing slash if the IdP has one (Auth0 does). It's used as written. `http` is only accepted for `localhost`, `127.0.0.1` and `::1`.
+- `user_claim` picks which ID token claim is the user's identity. Default `sub`, which is stable per issuer. `email` works too, but the ID token must also carry `email_verified: true` or the login is denied; request the `email` scope for it. The claim has to be in the ID token itself; the userinfo endpoint isn't read. If the claim is missing or isn't a non-empty string, login is denied.
+- Use a `user_claim` that is immutable and unique per issuer. Claims like `preferred_username` or `upn` can be reassigned at some IdPs, and then a new holder of the name would log in as the old user.
+- Multi-tenant Entra (the `common` and `organizations` endpoints) isn't supported: their issuer is templated, so it can't match the strict issuer check. Single-tenant Entra works.
+- The IdP isn't contacted at startup. The first login through a provider fetches its discovery document and keys, and a success is cached for the life of the process. A failure isn't cached, the user sees "Couldn't reach <label>. Try again.", and the next attempt retries.
+
+### open-payments-oidc
+
+[open-payments-oidc](https://github.com/cozminu/open-payments-oidc) is a self-hosted OIDC provider where people sign in with an Open Payments wallet address. It replaces the wallet login mcp-dock used to have built in.
+
+1. In open-payments-oidc's `clients.json`, add a confidential client for mcp-dock, with a `client_secret` and `redirect_uris` set to `<public_url>/oauth/oidc/wallet/callback` (use whatever `name` you gave the provider in place of `wallet`). Check its README for the exact format.
+2. In mcp-dock, add the provider with `issuer` set to open-payments-oidc's root URL, and leave `user_claim` at `sub`. Its `sub` is the canonical wallet address URL.
+3. Allowlist the `https://` form of the wallet address, as it appears in `sub`: `https://ilp.interledger-test.dev/alice`, not the `$host/path` shortcut. Allowlist entries for OIDC are matched as plain strings; there's no wallet address normalization.
+
+```yaml
+providers:
+  oidc:
+    - name: wallet
+      label: Open Payments wallet
+      issuer: https://oidc.example.com
+      client_id: mcp-dock
+      client_secret_env: WALLET_OIDC_SECRET
+allowed_users:
+  oidc:
+    wallet:
+      - https://ilp.interledger-test.dev/alice
+```
 
 ## Config
 
@@ -289,12 +315,19 @@ See `config.example.yaml`. Unknown fields are rejected. A bad config fails start
 - `providers`: login providers. Configure at least one. The old top-level `github:` block and flat `allowed_users` list are rejected at startup, with a message saying where they moved.
   - `providers.github.client_id`: GitHub OAuth App client ID.
   - `providers.github.client_secret_env`: name of the env var holding the client secret.
-  - `providers.open_payments.wallet_address`: the gateway's own wallet address (`$host/path` or `https://host/path`).
-  - `providers.open_payments.key_id`: key ID of the gateway's Ed25519 key in that wallet.
-  - `providers.open_payments.private_key_env`: name of the env var holding the private key (PEM text or base64 of the PEM, not a path).
+  - `providers.oidc`: optional list of OIDC providers. Each entry:
+    - `name`: required. Lowercase letters, digits, single `_` or `-`; unique among OIDC providers; not `github`. Used in user ids, `allowed_users.oidc` keys and the route paths. Renaming it changes its users' ids (see [Operational notes](#operational-notes)).
+    - `label`: sign-in button text. Default: the name.
+    - `issuer`: required. Absolute URL, no query, fragment or credentials; `https`, except `http` for `localhost`, `127.0.0.1` and `::1`. Kept exactly as written (no slash trimming). Two providers can't share an issuer (trailing slashes ignored when comparing).
+    - `client_id`: required.
+    - `client_secret_env`: required. Name of the env var holding the client secret; it must be non-empty at startup.
+    - `scopes`: default `[openid]`. `openid` is always sent, and is added if you leave it out.
+    - `user_claim`: ID token claim used as the user's identity. Default `sub`. With `email`, `email_verified` must be true.
+  - The sign-in page shows one button per provider: GitHub first, then OIDC providers in config order. With exactly one provider, `/authorize` skips the page and goes straight to it.
+  - `providers.open_payments` and `allowed_users.open_payments` are gone. Either one is rejected at startup with `config: built-in Open Payments login was removed; run open-payments-oidc and add it under providers.oidc`.
 - `allowed_users`: per-provider allowlists. A list for a provider that isn't configured is a startup error. Checked at login, at token issue and refresh, and on every MCP request. There's no config hot reload, so removing an entry takes effect after a restart; the restart also drops that user's open sessions.
   - `allowed_users.github`: GitHub logins, case-insensitive.
-  - `allowed_users.open_payments`: wallet addresses. `$host/path` and `https://host/path` are the same entry; both are normalized to `https://host/path` at load. Only `https` is accepted, with no query, fragment or credentials. Scheme and host are case-insensitive (lowercased); the path is case-sensitive and kept as written. A trailing slash is ignored, and a bare `$host` means `https://host/.well-known/pay`.
+  - `allowed_users.oidc.<name>`: entries for the OIDC provider with that name; naming a provider that isn't in `providers.oidc` is a startup error. Entries are trimmed and matched exactly against the claim value, with one exception: when the provider's `user_claim` is `email`, entries and the signed-in value are lowercased. An entry for one provider never admits a user from another, even with the same value.
 - `upstreams`: list of streamable HTTP MCP servers, usually mcp-runner containers in front of stdio servers.
   - `name`: lowercase letters, digits, single `_` or `-`; no `__`; unique.
   - `url`: the server's MCP endpoint, e.g. `http://jaypost:8080/mcp`. Absolute `http` or `https` with a host; a path is fine, but no query, fragment or `user:pass@`, so credentials don't end up in the config file or in logged URLs. Kept as written. `http` is allowed since runners usually sit on an internal network.
@@ -302,9 +335,9 @@ See `config.example.yaml`. Unknown fields are rejected. A bad config fails start
   - `deny_args`: dotted argument paths rejected before the call reaches the upstream (e.g. `attachment.path`). Each segment is an exact property name (no wildcards), matched case-insensitively. Arrays along the path are looked through, so `attachment.path` also blocks `{"attachment": [{"path": ...}]}`. Denied paths are also removed from the tool schemas clients see. A path that matches no parameter of any of the upstream's tools is logged as a warning, since it's probably a typo.
   - `command`, `args`, `env` and `env_from` (the old stdio fields) are rejected at startup with a message saying stdio upstreams moved to mcp-runner.
 
-Users are separate per provider. GitHub login `alice` is user `github:alice`; wallet `$example.com/alice` is user `open_payments:https://example.com/alice`. The same person signing in both ways is two users, each needing their own allowlist entry and having their own consent and tokens. There is no account linking. Existing GitHub users are migrated to `github:<login>` ids at startup, so their sessions and GitHub ID pins carry over.
+Users are separate per provider. GitHub login `alice` is user `github:alice`; claim value `https://example.com/alice` at the OIDC provider named `wallet` is user `oidc:wallet:https://example.com/alice` (the value can contain colons). The same person signing in at two providers is two users, each needing their own allowlist entry and having their own consent and tokens. There is no account linking. Existing GitHub users are migrated to `github:<login>` ids at startup, so their sessions and GitHub ID pins carry over.
 
-Wallet login checks, in order: the typed address must be on the allowlist before the gateway makes any request to it (so it never fetches a URL a stranger typed); the `id` in the wallet's own document must be on the allowlist too, and have the same scheme, host and port as what was typed; and the address is checked once more after the wallet provider finalizes the grant.
+Users who signed in with the old built-in Open Payments login have `open_payments:...` ids. Those tokens and consents no longer work; they sign in again through an OIDC provider and need a new allowlist entry under `allowed_users.oidc.<name>`. Nothing is migrated.
 
 ## Caller identity
 
@@ -314,7 +347,7 @@ Every `tools/call` the gateway sends to an upstream says who the signed-in user 
 "io.github.bithyte.mcp-dock/user": {"provider": "github", "id": "octocat"}
 ```
 
-`provider` is `github` or `open_payments`. For GitHub, `id` is the login, lowercased. For Open Payments, it's the normalized wallet address, e.g. `{"provider": "open_payments", "id": "https://wallet.example/alice"}`. `_meta` reaches stdio servers behind mcp-runner unchanged, so that's the field to read.
+`provider` is `github` or `oidc:<name>`. For GitHub, `id` is the login, lowercased. For OIDC, it's the claim value (lowercased if `user_claim` is `email`), e.g. `{"provider": "oidc:wallet", "id": "https://ilp.interledger-test.dev/alice"}`. `_meta` reaches stdio servers behind mcp-runner unchanged, so that's the field to read.
 
 The same two values are also sent as HTTP headers, `X-MCP-Dock-User-Provider` and `X-MCP-Dock-User-Id`, for HTTP-native upstreams that can't read `_meta`. They go on every request the gateway makes on behalf of the call: the POST carrying the `tools/call`, and also a `notifications/cancelled` for it if the call is cancelled. mcp-runner ignores them. If a value isn't a valid HTTP header value, the headers are left out for that call and only `_meta` carries the identity. Requests not made on behalf of a call (initialize, tools/list, pings) carry none, since the session is shared by all users.
 
@@ -325,7 +358,7 @@ An upstream can only trust these values because it trusts the gateway: keep it r
 ## Environment variables
 
 - `GITHUB_CLIENT_SECRET` (or whatever `providers.github.client_secret_env` names): GitHub OAuth App secret.
-- `OP_PRIVATE_KEY` (or whatever `providers.open_payments.private_key_env` names): the gateway's Ed25519 private key, PEM text or base64 of the PEM.
+- `WALLET_OIDC_SECRET` (or whatever an OIDC provider's `client_secret_env` names): that provider's client secret. One per provider.
 - `JAYPOST_RUNNER_TOKEN` (or whatever an upstream's `bearer_token_env` names): bearer token for that upstream's runner.
 - `MCP_DOCK_CONFIG`: default config path.
 
@@ -351,15 +384,15 @@ These steps haven't been checked against jaypost's own docs. The owner should co
 2. Config with `public_url: http://localhost:8080`, your login in `allowed_users.github`, a throwaway `data_dir`.
 3. Start a runner for jaypost on the host: `JAYPOST_URL=http://127.0.0.1:8787 JAYPOST_TOKEN=... MCP_RUNNER_LISTEN=127.0.0.1:8081 ./mcp-runner jaypost mcp`, and point the upstream at it with `url: http://127.0.0.1:8081/mcp` (no `bearer_token_env` needed for a local test).
    Then `GITHUB_CLIENT_SECRET=... ./mcp-dock serve -config config.yaml`.
-4. Run MCP Inspector in proxy mode (connection through the Inspector's proxy, not direct from the browser; `/mcp` sends no CORS headers, so a direct browser connection fails) and connect with streamable HTTP to `http://localhost:8080/mcp`. It registers via `/register` (dynamic client registration), sends you through the sign-in page (GitHub, or your wallet address if Open Payments is configured) and the consent page, then lists `jaypost__*` tools.
+4. Run MCP Inspector in proxy mode (connection through the Inspector's proxy, not direct from the browser; `/mcp` sends no CORS headers, so a direct browser connection fails) and connect with streamable HTTP to `http://localhost:8080/mcp`. It registers via `/register` (dynamic client registration), sends you through the sign-in page (a button per configured provider) and the consent page, then lists `jaypost__*` tools.
 
 ## users reset
 
-    mcp-dock users reset [-config path] <login | wallet address>
+    mcp-dock users reset [-config path] <login | github:<login> | oidc:<provider>:<value>>
 
 If a login is already bound to one GitHub numeric ID and someone with a different ID signs in as it, the gateway denies and logs a warning. `users reset` clears that user's stored GitHub ID, consents, and tokens so it can re-bind. It operates directly on the SQLite DB.
 
-The argument is a GitHub login (`alice` or `github:alice`) or a wallet address (`$example.com/alice`, an `https://` URL, or `open_payments:...`). It only resets that one user; the GitHub and wallet users of the same name are unaffected.
+The argument is a GitHub login (`alice` or `github:alice`) or an OIDC user (`oidc:wallet:https://ilp.interledger-test.dev/alice`; everything after the second colon is the claim value). For an OIDC user it clears consents and tokens; there's no stored ID to clear. For a provider with `user_claim: email` the value is lowercased before reset, so `oidc:corp:Alice@Example.com` resets `alice@example.com`. The `$host/path` and `https://...` wallet shortcuts are gone, so `users reset '$example.com/alice'` is an error. It only resets that one user; users of the same name at other providers are unaffected.
 
 ## Known limits
 
@@ -368,19 +401,23 @@ The argument is a GitHub login (`alice` or `github:alice`) or a wallet address (
 - Async request IDs are lost if the upstream restarts.
 - `attachment.path` is blocked (`deny_args`) so remote users can't read host files.
 - `project_name` is not stamped with the caller's identity.
+- The OIDC login trusts the IdP's ID token and nothing else: no userinfo lookups, no group or role claims, no allowlist patterns (exact entries only), no account linking, no logout at the IdP.
 - One shared process per upstream; no per-user access control, no config hot reload, no admin UI.
 
 ## Operational notes
 
 - Refresh tokens rotate on every use. Replaying a used refresh token is rejected, but it does not revoke tokens already issued from it (known gap).
-- Consent is remembered per (user, client, redirect URI), where the user is a GitHub login or a wallet address.
+- Consent is remembered per (user, client, redirect URI), where the user is a GitHub login or an OIDC user.
 - TLS must be terminated by a reverse proxy in front, and it must preserve the public Host header.
 - Shutdown can take up to about 12s: up to 10s for open HTTP requests to drain, then closing the upstream sessions (about 2s each, in parallel). Set a container stop timeout of at least 15s.
 - A child's stderr is logged verbatim by its runner (one `upstream stderr` record per line), so whatever an upstream prints, including anything sensitive, ends up in the runner's log.
 - Existing GitHub logins are migrated automatically at startup; no manual database changes are needed.
+- The IdP isn't contacted until the first login through that provider, so an IdP outage at startup doesn't stop the Dock, and GitHub logins and tokens already issued keep working.
+- Changing an OIDC provider's `name` changes its users' ids (`oidc:<name>:<value>`). Their old tokens and consents stop working, they log in again, and the allowlist key has to be renamed to match.
 
 ## Manual verification (owner)
 
-- [ ] A wallet address on `allowed_users.open_payments` signs in through a real wallet provider, with the gateway's real key. Checking the wallet provider publishes the key under `key_id` is part of this; nothing at startup does.
+- [ ] Login through open-payments-oidc. Run it locally (`http://localhost:3000`), register mcp-dock as a confidential client with redirect URI `http://localhost:<port>/oauth/oidc/wallet/callback` and a `client_secret`, put the matching `providers.oidc` entry (`issuer: http://localhost:3000`, `client_secret_env` set) in the config, allowlist your wallet's `https://` form under `allowed_users.oidc.wallet`, and sign in from an MCP client. The consent page should say you're signed in as that `https://` address, and `jaypost` tool calls should carry `{"provider": "oidc:wallet", ...}`.
+- [ ] Same check against open-payments-oidc deployed behind https.
 - [ ] MCP Inspector completes OAuth via DCR against a real GitHub OAuth App, lists `jaypost__*` tools, and `jaypost__notify_user` delivers to Telegram/Discord.
 - [ ] Once reachable over https, add as a Claude Desktop custom connector. Logs should show a hit on `/register`. If it sends a URL as `client_id` (Client ID Metadata Document), CIMD support is needed; that is a new task.

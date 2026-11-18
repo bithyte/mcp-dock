@@ -26,8 +26,6 @@ const (
 	consentPath     = "/oauth/consent"
 	callbackPath    = "/oauth/github/callback"
 	githubStartPath = "/oauth/github/start"
-	opStartPath     = "/oauth/open-payments/start"
-	opCallbackPath  = "/oauth/open-payments/callback"
 
 	maxStateLen = 2048
 	maxScopeLen = 1024
@@ -95,8 +93,8 @@ func validChallenge(c string) bool {
 
 // handleAuthorize starts an authorization: it validates the client and
 // redirect URI, saves an AuthRequest, binds it to this browser with a
-// cookie, and shows the sign-in page. With GitHub as the only provider it
-// skips the page and sends the user straight to GitHub.
+// cookie, and shows the sign-in page. With GitHub or one OIDC provider as
+// the only provider it skips the page and sends the user straight there.
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -171,7 +169,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		Scope:         q.Get("scope"),
 		ExpiresAt:     s.now().Add(authRequestTTL),
 	}
-	if s.gh == nil && s.op == nil {
+	if s.providerCount() == 0 {
 		s.serverError(w, "no login provider", errors.New("no login provider is configured"))
 		return
 	}
@@ -181,11 +179,27 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setAuthCookie(w, ar.ID, int(authRequestTTL/time.Second))
-	if s.op == nil {
-		s.redirect(w, s.gh.AuthorizeURL(ar.ID, s.cfg.PublicURL+callbackPath))
-		return
+	// One provider: skip the page and go straight to it.
+	if s.providerCount() == 1 {
+		switch {
+		case s.gh != nil:
+			s.redirect(w, s.gh.AuthorizeURL(ar.ID, s.cfg.PublicURL+callbackPath))
+			return
+		case len(s.oidc) == 1:
+			s.oidcBegin(w, r, &ar, s.oidc[0])
+			return
+		}
 	}
-	s.signin(w, http.StatusOK, client.Name, ar.ID, "", "")
+	s.signin(w, client.Name, ar.ID)
+}
+
+// providerCount is the number of configured login providers.
+func (s *Server) providerCount() int {
+	n := len(s.oidc)
+	if s.gh != nil {
+		n++
+	}
+	return n
 }
 
 // handleGitHubCallback finishes the GitHub login. The state must name an
@@ -299,14 +313,14 @@ func (s *Server) afterLogin(w http.ResponseWriter, r *http.Request, ar *store.Au
 	s.writeHTML(w, http.StatusOK, consentTmpl, consentData{
 		ClientName: clientName,
 		Redirect:   redirectDisplay(ar.RedirectURI),
-		Provider:   identity.Label(provider),
+		Provider:   s.cfg.ProviderLabel(provider),
 		Name:       displayName,
 		RequestID:  ar.ID,
 	})
 }
 
 // handleConsent takes the Approve/Deny POST. The AuthRequest must exist,
-// be past GitHub login, and equal this browser's cookie; anything else is an
+// be past provider login, and equal this browser's cookie; anything else is an
 // error page and never a code.
 //
 // CSRF: the cookie is SameSite=Lax, so browsers don't send it on a
@@ -435,7 +449,7 @@ func (s *Server) badLink(w http.ResponseWriter) {
 // notAllowed is the only 403 page. Allowlist misses and GitHub ID
 // mismatches look the same; the reason is in the server log.
 func (s *Server) notAllowed(w http.ResponseWriter, userID string) {
-	s.errorPage(w, http.StatusForbidden, "Access denied", identity.Describe(userID)+" isn't allowed on this gateway.")
+	s.errorPage(w, http.StatusForbidden, "Access denied", s.cfg.DescribeUser(userID)+" isn't allowed on this gateway.")
 }
 
 func (s *Server) serverError(w http.ResponseWriter, what string, err error) {

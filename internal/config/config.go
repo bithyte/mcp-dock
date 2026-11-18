@@ -3,10 +3,6 @@ package config
 
 import (
 	"bytes"
-	"crypto/ed25519"
-	"crypto/x509"
-	"encoding/base64"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -32,23 +28,26 @@ type Config struct {
 }
 
 type ProvidersConfig struct {
-	GitHub       *GitHubConfig       `yaml:"github"`
-	OpenPayments *OpenPaymentsConfig `yaml:"open_payments"`
+	GitHub *GitHubConfig `yaml:"github"`
+	OIDC   []OIDCConfig  `yaml:"oidc"`
 }
 
-type OpenPaymentsConfig struct {
-	WalletAddress string `yaml:"wallet_address"` // normalized at load
-	KeyID         string `yaml:"key_id"`
-	PrivateKeyEnv string `yaml:"private_key_env"`
-	// PrivateKey is the normalized PEM text (trimmed; base64 already
-	// decoded), checked at load to hold an Ed25519 PKCS#8 key.
-	PrivateKey string `yaml:"-"`
+// OIDCConfig is one OpenID Connect provider.
+type OIDCConfig struct {
+	Name            string   `yaml:"name"`
+	Label           string   `yaml:"label"`  // defaulted to Name
+	Issuer          string   `yaml:"issuer"` // verbatim, no slash trimming
+	ClientID        string   `yaml:"client_id"`
+	ClientSecretEnv string   `yaml:"client_secret_env"`
+	Scopes          []string `yaml:"scopes"`     // defaulted; openid always first
+	UserClaim       string   `yaml:"user_claim"` // defaulted to "sub"
+	ClientSecret    string   `yaml:"-"`
 }
 
 // AllowedUsers lists who may log in, per provider.
 type AllowedUsers struct {
-	GitHub       []string `yaml:"github"`
-	OpenPayments []string `yaml:"open_payments"` // normalized at load
+	GitHub []string            `yaml:"github"`
+	OIDC   map[string][]string `yaml:"oidc"` // provider name -> entries
 }
 
 type GitHubConfig struct {
@@ -183,6 +182,13 @@ func rejectOldShape(data []byte) error {
 	if _, ok := raw["allowed_users"].([]any); ok {
 		return errors.New("config: allowed_users is now per provider, e.g. allowed_users.github: [...]")
 	}
+	for _, section := range []string{"providers", "allowed_users"} {
+		if m, ok := raw[section].(map[string]any); ok {
+			if _, ok := m["open_payments"]; ok {
+				return errors.New("config: built-in Open Payments login was removed; run open-payments-oidc and add it under providers.oidc")
+			}
+		}
+	}
 	ups, _ := raw["upstreams"].([]any)
 	for i, up := range ups {
 		m, ok := up.(map[string]any)
@@ -199,9 +205,9 @@ func rejectOldShape(data []byte) error {
 }
 
 func (c *Config) validateProviders(getenv func(string) string) error {
-	gh, op := c.Providers.GitHub, c.Providers.OpenPayments
-	if gh == nil && op == nil {
-		return errors.New("providers: configure at least one of providers.github or providers.open_payments")
+	gh := c.Providers.GitHub
+	if gh == nil && len(c.Providers.OIDC) == 0 {
+		return errors.New("providers: configure at least one of providers.github or providers.oidc")
 	}
 	if gh != nil {
 		if gh.ClientID == "" {
@@ -217,66 +223,103 @@ func (c *Config) validateProviders(getenv func(string) string) error {
 	} else if len(c.AllowedUsers.GitHub) > 0 {
 		return errors.New("allowed_users.github is set but providers.github is not configured")
 	}
-	if op != nil {
-		w, err := identity.NormalizeWalletAddress(op.WalletAddress)
-		if err != nil {
-			return fmt.Errorf("providers.open_payments.wallet_address: %w", err)
+	return c.validateOIDC(getenv)
+}
+
+// validateOIDC checks providers.oidc, fills defaults, resolves secrets and
+// normalizes allowed_users.oidc.
+func (c *Config) validateOIDC(getenv func(string) string) error {
+	names := map[string]bool{}
+	issuers := map[string]bool{}
+	for i := range c.Providers.OIDC {
+		o := &c.Providers.OIDC[i]
+		p := fmt.Sprintf("providers.oidc[%d]", i)
+		if !nameRe.MatchString(o.Name) || o.Name == string(identity.GitHub) {
+			return fmt.Errorf("%s.name %q invalid: use lowercase letters, digits, single _ or -, and not %q", p, o.Name, identity.GitHub)
 		}
-		op.WalletAddress = w
-		if strings.TrimSpace(op.KeyID) == "" {
-			return errors.New("providers.open_payments.key_id is required")
+		if names[o.Name] {
+			return fmt.Errorf("%s.name %q is a duplicate", p, o.Name)
 		}
-		if op.PrivateKeyEnv == "" {
-			return errors.New("providers.open_payments.private_key_env is required")
+		names[o.Name] = true
+		if err := checkIssuer(o.Issuer); err != nil {
+			return fmt.Errorf("%s.issuer: %w", p, err)
 		}
-		pemText, err := checkEd25519Key(getenv(op.PrivateKeyEnv))
-		if err != nil {
-			return fmt.Errorf("providers.open_payments.private_key_env: env var %s %w", op.PrivateKeyEnv, err)
+		key := strings.TrimRight(o.Issuer, "/")
+		if issuers[key] {
+			return fmt.Errorf("%s.issuer %q duplicates another provider's issuer", p, o.Issuer)
 		}
-		op.PrivateKey = pemText
-	} else if len(c.AllowedUsers.OpenPayments) > 0 {
-		return errors.New("allowed_users.open_payments is set but providers.open_payments is not configured")
+		issuers[key] = true
+		if o.ClientID == "" {
+			return fmt.Errorf("%s.client_id is required", p)
+		}
+		if o.ClientSecretEnv == "" {
+			return fmt.Errorf("%s.client_secret_env is required", p)
+		}
+		o.ClientSecret = getenv(o.ClientSecretEnv)
+		if o.ClientSecret == "" {
+			return fmt.Errorf("%s.client_secret_env: env var %s is empty or unset", p, o.ClientSecretEnv)
+		}
+		if o.Label == "" {
+			o.Label = o.Name
+		}
+		if o.UserClaim == "" {
+			o.UserClaim = "sub"
+		}
+		scopes := []string{"openid"}
+		for _, s := range o.Scopes {
+			if s != "openid" {
+				scopes = append(scopes, s)
+			}
+		}
+		o.Scopes = scopes
 	}
-	for i, e := range c.AllowedUsers.OpenPayments {
-		n, err := identity.NormalizeWalletAddress(e)
-		if err != nil {
-			return fmt.Errorf("allowed_users.open_payments[%d]: %w", i, err)
+	for name, entries := range c.AllowedUsers.OIDC {
+		o := c.OIDCProvider(name)
+		if o == nil {
+			return fmt.Errorf("allowed_users.oidc.%s: no provider named %q in providers.oidc", name, name)
 		}
-		c.AllowedUsers.OpenPayments[i] = n
+		for i, e := range entries {
+			e = strings.TrimSpace(e)
+			if e == "" {
+				return fmt.Errorf("allowed_users.oidc.%s[%d] is empty", name, i)
+			}
+			if o.UserClaim == "email" {
+				e = strings.ToLower(e)
+			}
+			entries[i] = e
+		}
 	}
 	return nil
 }
 
-// checkEd25519Key checks v is PEM text, or base64 of PEM text, holding an
-// Ed25519 PKCS#8 key, and returns the trimmed PEM text. The returned error
-// never includes v.
-func checkEd25519Key(v string) (string, error) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return "", errors.New("is empty or unset")
+// checkIssuer checks s is an absolute URL with a host and no userinfo, query
+// or fragment. It must be https, except for loopback hosts.
+func checkIssuer(s string) error {
+	if s == "" {
+		return errors.New("is required")
 	}
-	if !strings.HasPrefix(v, "-----BEGIN") {
-		dec, err := base64.StdEncoding.DecodeString(v)
-		if err != nil {
-			return "", errors.New("must be PEM text or base64 of PEM text, not a file path")
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" || u.Opaque != "" {
+		return fmt.Errorf("must be an absolute https URL, got %q", s)
+	}
+	if u.User != nil {
+		return errors.New("must not contain userinfo")
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(s, "?#") {
+		return fmt.Errorf("must not have a query or fragment, got %q", s)
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		switch u.Hostname() {
+		case "localhost", "127.0.0.1", "::1":
+		default:
+			return fmt.Errorf("must use https (http is only allowed for localhost, 127.0.0.1 and ::1), got %q", s)
 		}
-		v = strings.TrimSpace(string(dec))
-		if !strings.HasPrefix(v, "-----BEGIN") {
-			return "", errors.New("must be PEM text or base64 of PEM text, not a file path")
-		}
+	default:
+		return fmt.Errorf("must be an absolute https URL, got %q", s)
 	}
-	block, _ := pem.Decode([]byte(v))
-	if block == nil {
-		return "", errors.New("does not hold a valid PEM block")
-	}
-	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return "", errors.New("does not hold a PKCS#8 private key")
-	}
-	if _, ok := key.(ed25519.PrivateKey); !ok {
-		return "", errors.New("must hold an Ed25519 key")
-	}
-	return v, nil
+	return nil
 }
 
 // validDenyPath reports whether d is a dotted path whose every segment is
@@ -297,8 +340,8 @@ func validDenyPath(d string) bool {
 }
 
 // IsAllowed reports whether the user id is on the allowlist. GitHub logins
-// match case-insensitively; wallet addresses match exactly against the
-// normalized entries.
+// match case-insensitively; OIDC values match exactly against the entries
+// for their provider.
 func (c *Config) IsAllowed(userID string) bool {
 	p, name, ok := identity.Split(userID)
 	if !ok {
@@ -311,14 +354,80 @@ func (c *Config) IsAllowed(userID string) bool {
 				return true
 			}
 		}
-	case identity.OpenPayments:
-		for _, u := range c.AllowedUsers.OpenPayments {
+	default:
+		prov, isOIDC := p.OIDCName()
+		if !isOIDC || c.OIDCProvider(prov) == nil {
+			return false
+		}
+		for _, u := range c.AllowedUsers.OIDC[prov] {
 			if u == name {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// OIDCProvider returns the configured OIDC provider with the given name, or
+// nil.
+func (c *Config) OIDCProvider(name string) *OIDCConfig {
+	for i := range c.Providers.OIDC {
+		if c.Providers.OIDC[i].Name == name {
+			return &c.Providers.OIDC[i]
+		}
+	}
+	return nil
+}
+
+// ProviderLabel is the display name of a provider. Unknown providers are
+// returned as their id.
+func (c *Config) ProviderLabel(p identity.Provider) string {
+	if name, ok := p.OIDCName(); ok {
+		if o := c.OIDCProvider(name); o != nil {
+			return o.Label
+		}
+		return string(p)
+	}
+	if p == identity.GitHub {
+		return "GitHub"
+	}
+	return string(p)
+}
+
+// DescribeUser is a human readable description of a user id. Unknown ids are
+// returned unchanged.
+func (c *Config) DescribeUser(id string) string {
+	p, value, ok := identity.Split(id)
+	if !ok {
+		return id
+	}
+	if name, isOIDC := p.OIDCName(); isOIDC {
+		if o := c.OIDCProvider(name); o != nil {
+			return o.Label + " user " + value
+		}
+		return id
+	}
+	if p == identity.GitHub {
+		return "GitHub account " + value
+	}
+	return id
+}
+
+// CanonicalUser lowercases the value of an OIDC user id whose provider uses
+// the email claim. Other ids are returned unchanged.
+func (c *Config) CanonicalUser(id string) string {
+	p, value, ok := identity.Split(id)
+	if !ok {
+		return id
+	}
+	name, isOIDC := p.OIDCName()
+	if !isOIDC {
+		return id
+	}
+	if o := c.OIDCProvider(name); o != nil && o.UserClaim == "email" {
+		return identity.OIDCUser(name, strings.ToLower(value))
+	}
+	return id
 }
 
 // ResourceURL is the MCP endpoint, also the OAuth resource.

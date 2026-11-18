@@ -724,9 +724,9 @@ func TestIdentityMeta(t *testing.T) {
 	if got := callAs(t, h.u, "github:alice", "whoami", `{}`); got != `{"id":"alice","provider":"github"}` {
 		t.Fatalf("whoami as github:alice = %s", got)
 	}
-	want := `{"id":"https://wallet.example/alice","provider":"open_payments"}`
-	if got := callAs(t, h.u, "open_payments:https://wallet.example/alice", "whoami", `{}`); got != want {
-		t.Fatalf("whoami as wallet = %s, want %s", got, want)
+	want := `{"id":"https://wallet.example/alice","provider":"oidc:wallet"}`
+	if got := callAs(t, h.u, "oidc:wallet:https://wallet.example/alice", "whoami", `{}`); got != want {
+		t.Fatalf("whoami as oidc:wallet = %s, want %s", got, want)
 	}
 }
 

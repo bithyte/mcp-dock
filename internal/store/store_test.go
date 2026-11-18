@@ -78,14 +78,14 @@ func TestSetAuthRequestUserOnce(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()
 	saveReq(t, s, "a", time.Now().Add(time.Hour))
-	if err := s.SetAuthRequestUser(ctx, "a", "open_payments:https://w.example/alice", 0); err != nil {
+	if err := s.SetAuthRequestUser(ctx, "a", "oidc:wallet:https://w.example/alice", 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetAuthRequestUser(ctx, "a", "github:x", 1); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second set err = %v, want ErrNotFound", err)
 	}
 	got, err := s.GetAuthRequest(ctx, "a")
-	if err != nil || got.Login != "open_payments:https://w.example/alice" || got.GitHubID != 0 {
+	if err != nil || got.Login != "oidc:wallet:https://w.example/alice" || got.GitHubID != 0 {
 		t.Fatalf("%+v %v", got, err)
 	}
 	if err := s.SetAuthRequestUser(ctx, "missing", "github:x", 1); !errors.Is(err, ErrNotFound) {
@@ -307,18 +307,18 @@ func TestReopenKeepsData(t *testing.T) {
 	}
 }
 
-func TestStoreKeepsWalletCase(t *testing.T) {
+func TestStoreKeepsOIDCValueCase(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()
 	const a = "https://claude.ai/api/mcp/auth_callback"
-	if err := s.SaveConsent(ctx, "open_payments:https://w.example/Al", "c", a); err != nil {
+	if err := s.SaveConsent(ctx, "oidc:wallet:https://w.example/Al", "c", a); err != nil {
 		t.Fatal(err)
 	}
-	if has, _ := s.HasConsent(ctx, "open_payments:https://w.example/Al", "c", a); !has {
-		t.Error("exact wallet id has no consent")
+	if has, _ := s.HasConsent(ctx, "oidc:wallet:https://w.example/Al", "c", a); !has {
+		t.Error("exact oidc id has no consent")
 	}
-	if has, _ := s.HasConsent(ctx, "open_payments:https://w.example/al", "c", a); has {
-		t.Error("wallet ids must be case sensitive")
+	if has, _ := s.HasConsent(ctx, "oidc:wallet:https://w.example/al", "c", a); has {
+		t.Error("oidc ids must be case sensitive")
 	}
 }
 
@@ -331,7 +331,7 @@ func TestMigrateBareLogins(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	exec(`INSERT INTO users (login, github_id) VALUES ('Alice', 1), ('open_payments:https://w.example/Al', 2)`)
+	exec(`INSERT INTO users (login, github_id) VALUES ('Alice', 1), ('oidc:wallet:https://w.example/Al', 2)`)
 	exec(`INSERT INTO consents (login, client_id, redirect_uri) VALUES ('Alice', 'c', 'r')`)
 	exec(`INSERT INTO tokens (hash, kind, client_id, login, resource, scope, expires_at) VALUES ('t1','access','c','alice','','',1), ('t2','access','c','Alice','','',1)`)
 	exec(`INSERT INTO codes (hash, client_id, redirect_uri, code_challenge, resource, scope, login, expires_at) VALUES ('c1','c','r','','','','Alice',1), ('c2','c','r','','','','alice',1)`)
@@ -348,7 +348,7 @@ func TestMigrateBareLogins(t *testing.T) {
 		}
 		defer s2.Close()
 		for table, want := range map[string][]string{
-			"users":         {"github:alice", "open_payments:https://w.example/Al"},
+			"users":         {"github:alice", "oidc:wallet:https://w.example/Al"},
 			"consents":      {"github:alice"},
 			"tokens":        {"github:alice", "github:alice"},
 			"codes":         {"github:alice", "github:alice"},

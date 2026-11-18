@@ -14,10 +14,6 @@ body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0
 h1{font-size:1.4rem}
 .box{border:1px solid #ccc;border-radius:6px;padding:1rem;margin:1rem 0;overflow-wrap:anywhere}
 button{font-size:1rem;padding:.5rem 1.2rem;margin-right:.5rem;cursor:pointer}
-label{display:block;margin-bottom:.3rem}
-input[type=text]{font-size:1rem;padding:.4rem;width:100%;box-sizing:border-box;margin-bottom:.6rem}
-.or{text-align:center;color:#666}
-.error{color:#a00}
 </style>`
 
 var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
@@ -39,32 +35,18 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 </body></html>
 `))
 
-// signinTmpl is the provider choice (layout A in the design). Both forms
-// carry the request id like the consent form, for the same CSRF reasons.
+// signinTmpl is the provider choice (layout A in the design). Every form
+// carries the request id like the consent form, for the same CSRF reasons.
 var signinTmpl = template.Must(template.New("signin").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sign in to mcp-dock</title>` + pageStyle + `</head>
 <body>
 <h1>Sign in to mcp-dock</h1>
 <p><strong>{{.ClientName}}</strong> wants to use the tools on this gateway. Sign in first.</p>
-{{- if .GitHub}}
-<form method="post" action="/oauth/github/start">
-<input type="hidden" name="request" value="{{.RequestID}}">
-<button type="submit">Continue with GitHub</button>
-</form>
-{{- if .OpenPayments}}
-<p class="or">or</p>
-{{- end}}
-{{- end}}
-{{- if .OpenPayments}}
-<form method="post" action="/oauth/open-payments/start">
-<input type="hidden" name="request" value="{{.RequestID}}">
-<label for="wallet">Open Payments wallet address</label>
-<input type="text" id="wallet" name="wallet" value="{{.Wallet}}" placeholder="$ilp.interledger-test.dev/alice" autocomplete="off" autocapitalize="off" spellcheck="false" required>
-{{- if .Error}}
-<p class="error" role="alert">{{.Error}}</p>
-{{- end}}
-<button type="submit">Continue with wallet</button>
+{{- range .Buttons}}
+<form method="post" action="{{.Action}}">
+<input type="hidden" name="request" value="{{$.RequestID}}">
+<button type="submit">{{.Label}}</button>
 </form>
 {{- end}}
 </body></html>
@@ -84,8 +66,14 @@ type consentData struct {
 }
 
 type signinData struct {
-	ClientName, RequestID, Wallet, Error string
-	GitHub, OpenPayments                 bool
+	ClientName, RequestID string
+	Buttons               []signinButton // GitHub first, then OIDC in config order
+}
+
+// signinButton is one provider's sign-in form: a POST to Action carrying
+// the request id.
+type signinButton struct {
+	Action, Label string
 }
 
 type errorData struct {

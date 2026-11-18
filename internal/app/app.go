@@ -16,7 +16,7 @@ import (
 	"github.com/bithyte/mcp-dock/internal/github"
 	"github.com/bithyte/mcp-dock/internal/httpserver"
 	"github.com/bithyte/mcp-dock/internal/oauth"
-	"github.com/bithyte/mcp-dock/internal/oplogin"
+	"github.com/bithyte/mcp-dock/internal/oidclogin"
 	"github.com/bithyte/mcp-dock/internal/store"
 	"github.com/bithyte/mcp-dock/internal/upstream"
 )
@@ -29,7 +29,7 @@ type Options struct {
 	GitHubWebBaseURL string       // default https://github.com
 	GitHubAPIBaseURL string       // default https://api.github.com
 	GitHubHTTP       *http.Client // default: the github package's client
-	OpenPaymentsHTTP *http.Client // default: the oplogin package's client
+	OIDCHTTP         *http.Client // default: the oidclogin package's client
 	MinBackoff       time.Duration
 	MaxBackoff       time.Duration
 	Now              func() time.Time // oauth clock, default time.Now
@@ -43,24 +43,10 @@ type App struct {
 	Upstreams []*upstream.Upstream
 }
 
-// Build wires everything from cfg. Nothing runs until RunUpstreams. It
-// fails if the Open Payments client can't be built from the config.
+// Build wires everything from cfg. Nothing runs until RunUpstreams. The
+// error is always nil today; it's kept so a provider that can fail to build
+// doesn't change the signature.
 func Build(cfg *config.Config, log *slog.Logger, st *store.Store, opts Options) (*App, error) {
-	var op *oplogin.Client
-	if c := cfg.Providers.OpenPayments; c != nil {
-		var err error
-		op, err = oplogin.New(oplogin.Config{
-			WalletAddress: c.WalletAddress,
-			KeyID:         c.KeyID,
-			PrivateKey:    c.PrivateKey,
-			HTTP:          opts.OpenPaymentsHTTP,
-			Logger:        log,
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	a := &App{}
 	var gw *gateway.Gateway
 	backends := make([]gateway.Backend, 0, len(cfg.Upstreams))
@@ -95,13 +81,26 @@ func Build(cfg *config.Config, log *slog.Logger, st *store.Store, opts Options) 
 			HTTP:         opts.GitHubHTTP,
 		}
 	}
+	oidcClients := make([]*oidclogin.Client, 0, len(cfg.Providers.OIDC))
+	for _, p := range cfg.Providers.OIDC {
+		oidcClients = append(oidcClients, oidclogin.New(oidclogin.Config{
+			Name:         p.Name,
+			Issuer:       p.Issuer,
+			ClientID:     p.ClientID,
+			ClientSecret: p.ClientSecret,
+			Scopes:       p.Scopes,
+			UserClaim:    p.UserClaim,
+			HTTP:         opts.OIDCHTTP,
+			Now:          opts.Now,
+		}))
+	}
 	a.OAuth = oauth.New(oauth.Options{
-		Config:       cfg,
-		Store:        st,
-		GitHub:       gh,
-		OpenPayments: op,
-		Logger:       log,
-		Now:          opts.Now,
+		Config: cfg,
+		Store:  st,
+		GitHub: gh,
+		OIDC:   oidcClients,
+		Logger: log,
+		Now:    opts.Now,
 	})
 	a.Handler = httpserver.NewHandler(a.OAuth, gw)
 	return a, nil
